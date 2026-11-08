@@ -56,7 +56,7 @@
       if (a.dataset.page === active) a.classList.add("active");
     });
     // on a phone only the current mode shows (one chip): tapping it switches to the other
-    const compactMode = window.matchMedia("(max-width: 560px)");
+    const compactMode = window.matchMedia("(max-width: 760px)");
     el.querySelectorAll(".oa-mode button").forEach((b) =>
       b.addEventListener("click", () => applyMode(compactMode.matches && b.classList.contains("active")
         ? (b.dataset.mode === "pro" ? "simple" : "pro") : b.dataset.mode)));

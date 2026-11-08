@@ -204,6 +204,40 @@ test('full screen enter/exit restores navigation and a blocked request fills the
   assert.equal(await p.locator('.oa-nav').evaluate(e => e.inert), false);
 });
 
+test('navigation fits through the compact breakpoint without widening the page', async t => {
+  const p = await open(t);
+  for (const width of [560, 561, 600, 650, 700, 701, 760, 761]) {
+    await p.setViewportSize({ width, height: 900 });
+    assert.equal(await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `no overflow at ${width}px`);
+    const stage = await p.locator('#stageArea').boundingBox();
+    assert.ok(Math.abs(stage.x - (width - stage.x - stage.width)) < 1, `equal stage margins at ${width}px`);
+    await p.locator('.oa-mode button[data-mode="simple"]').click();
+    if (width <= 760) {
+      assert.equal(await p.evaluate(() => document.documentElement.classList.contains('mode-pro')), true);
+      await p.locator('.oa-mode button[data-mode="pro"]').click();
+      assert.equal(await p.evaluate(() => document.documentElement.classList.contains('mode-simple')), true);
+    }
+  }
+});
+
+test('compact health indicator is circular and centered, and still opens status details', async t => {
+  const p = await open(t);
+  for (const width of [390, 561, 700, 760, 761, 1100]) {
+    await p.setViewportSize({ width, height: 900 });
+    const button = await p.locator('#navHealth').boundingBox();
+    const dot = await p.locator('#navHealthLight').boundingBox();
+    assert.ok(Math.abs(button.width - button.height) < 1, `circle at ${width}px`);
+    assert.ok(Math.abs(button.x + button.width / 2 - dot.x - dot.width / 2) < 1, `centered horizontally at ${width}px`);
+    assert.ok(Math.abs(button.y + button.height / 2 - dot.y - dot.height / 2) < 1, `centered vertically at ${width}px`);
+    await p.locator('#navHealth').click();
+    assert.equal(await p.locator('.oa-health-pop').isVisible(), true);
+    await p.keyboard.press('Escape');
+    assert.equal(await p.locator('.oa-health-pop').count(), 0);
+  }
+  await p.setViewportSize({ width: 1101, height: 900 });
+  assert.equal(await p.locator('#navHealthLabel').isVisible(), true);
+});
+
 for (const [width, height] of [[320, 740], [390, 844], [844, 390], [1024, 768], [1440, 900]]) {
   test(`layout and navigation at ${width}x${height}`, async t => {
     const p = await open(t, { width, height });
@@ -213,7 +247,7 @@ for (const [width, height] of [[320, 740], [390, 844], [844, 390], [1024, 768], 
     await p.keyboard.press('ArrowLeft');
     assert.equal(await p.locator('#tp-chat').isVisible(), true);
     await p.locator('.oa-mode button[data-mode="simple"]').click();
-    if (width <= 560) assert.equal(await p.evaluate(() => document.documentElement.classList.contains('mode-pro')), true);
+    if (width <= 760) assert.equal(await p.evaluate(() => document.documentElement.classList.contains('mode-pro')), true);
     await p.locator('#fsBtn').click();
     await p.locator('[data-mode="window"]').click();
     const box = await p.locator('#sayInput').boundingBox();

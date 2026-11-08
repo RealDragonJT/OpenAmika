@@ -103,17 +103,16 @@ code, .mono { font-family: Consolas, "Cascadia Mono", monospace; font-size: .86e
 .oa-nav-links a.active { color: #fff; }
 .oa-nav-links a.active::after { width: 100%; }
 .oa-nav-status { display: flex; align-items: center; gap: 9px; padding-right: 10px; }
-/* narrow screens: the Japanese wordmark and the health label go first; under 560px the links take their own
+/* narrow screens: the Japanese wordmark and the health label go first; at 760px the links take their own
    row (About dropped: it's still in the footer) and the bar scrolls away instead of sticking */
 @media (max-width: 1100px) {
   .oa-nav { padding: 0 10px 0 16px; gap: 12px; }
   .oa-wordmark .mark-jp { display: none; }
   .oa-nav-links { gap: 18px; }
   .oa-nav-links a { font-size: 13.5px; letter-spacing: .08em; }
-  .oa-health { padding: 7px; margin-right: 0; }
   .oa-health .label { display: none; }
 }
-@media (max-width: 560px) {
+@media (max-width: 760px) {
   .oa-nav { position: relative; flex-wrap: wrap; height: auto; padding: 8px 10px 0 14px; row-gap: 2px; }
   .oa-nav-links { order: 3; flex-basis: 100%; gap: 22px; }
   .oa-nav-links a.oa-nav-wide { display: none; }
@@ -126,7 +125,13 @@ code, .mono { font-family: Consolas, "Cascadia Mono", monospace; font-size: .86e
   display: inline-flex; align-items: center; gap: 9px; margin-right: 6px;
   font-family: var(--font-body); font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
   color: var(--faint); background: transparent; border: 1px solid var(--line-strong); border-radius: 9999px;
-  padding: 5px 13px 5px 10px; cursor: pointer; transition: all .25s var(--ease);
+  padding: 5px 13px 5px 10px; cursor: pointer; transition: color .25s var(--ease), border-color .25s var(--ease);
+}
+@media (max-width: 1100px) {
+  .oa-health {
+    width: 30px; height: 30px; flex: 0 0 30px; justify-content: center;
+    padding: 0; gap: 0; margin-right: 0; border-radius: 50%;
+  }
 }
 .oa-health:hover { color: #fff; border-color: rgba(216, 180, 226, .5); }
 .oa-health .light, .oa-health-pop .light {
