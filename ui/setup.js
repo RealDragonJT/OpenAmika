@@ -658,6 +658,7 @@
       if (hearAudio) { try { hearAudio.pause(); } catch (_) {} }
       const mime = { opus: "audio/ogg", ogg: "audio/ogg", mp3: "audio/mpeg", wav: "audio/wav" }[r.audio_format] || "audio/wav";
       hearAudio = new Audio("data:" + mime + ";base64," + r.audio);
+      await window.OA.devices.applySink(hearAudio);
       await hearAudio.play();
     } catch (error) { toast("Her voice is unavailable: " + (error.message || error), true); }
     finally { $("pHear").disabled = false; }

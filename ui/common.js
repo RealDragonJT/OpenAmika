@@ -41,7 +41,7 @@
         <a href="/setup" data-page="setup">Setup</a>
         <a href="/tools" data-page="tools">Tools</a>
         <a href="/use" data-page="use">Use</a>
-        <a href="/about" data-page="about">About</a>
+        <a href="/about" data-page="about" class="oa-nav-wide">About</a>
       </div>
       <div style="display:flex;align-items:center;">
         <div class="oa-mode" title="Simple hides the expert controls; Professional shows everything">
@@ -55,8 +55,11 @@
     el.querySelectorAll("a[data-page]").forEach((a) => {
       if (a.dataset.page === active) a.classList.add("active");
     });
+    // on a phone only the current mode shows (one chip): tapping it switches to the other
+    const compactMode = window.matchMedia("(max-width: 560px)");
     el.querySelectorAll(".oa-mode button").forEach((b) =>
-      b.addEventListener("click", () => applyMode(b.dataset.mode)));
+      b.addEventListener("click", () => applyMode(compactMode.matches && b.classList.contains("active")
+        ? (b.dataset.mode === "pro" ? "simple" : "pro") : b.dataset.mode)));
     document.body.prepend(el);
     applyMode(uiMode());
     startHealth();
@@ -85,6 +88,9 @@
       toastEl.className = "oa-toast";
       document.body.append(toastEl);
     }
+    // in true fullscreen only the fullscreen element is drawn: the toast has to live inside it to be seen
+    const host = document.fullscreenElement || document.body;
+    if (toastEl.parentNode !== host) host.append(toastEl);
     toastEl.textContent = message;
     toastEl.classList.toggle("err", !!isError);
     toastEl.classList.add("show");
@@ -302,5 +308,23 @@
     pct: (v) => (Number.isFinite(v) ? (Math.round(v * 10) / 10) + "%" : "—"),
   };
 
-  window.OA = { nav, footer, toast, getJSON, postAction, el, setNavDot, fmt, healthCheck, onHealth };
+  // ── the mic / camera / speaker picked on the Use page (per browser; "" = the system default) ──
+  const DEVICE_KEYS = { mic: "openamika-micDevice", cam: "openamika-camDevice", speaker: "openamika-speakerDevice" };
+  const devices = {
+    get(kind) { try { return localStorage.getItem(DEVICE_KEYS[kind]) || ""; } catch (_) { return ""; } },
+    set(kind, id) {
+      try { id ? localStorage.setItem(DEVICE_KEYS[kind], id) : localStorage.removeItem(DEVICE_KEYS[kind]); } catch (_) {}
+    },
+    // her voice plays through an AudioContext, so both kinds of sink must be settable (Chromium yes; Firefox, Safari no)
+    canPickSpeaker: typeof HTMLMediaElement !== "undefined" && "setSinkId" in HTMLMediaElement.prototype
+      && typeof AudioContext !== "undefined" && "setSinkId" in AudioContext.prototype,
+    // a plain <audio>: play through the picked speaker (a missing device leaves it on the default)
+    async applySink(audio) {
+      const id = devices.get("speaker");
+      if (!id || !audio || typeof audio.setSinkId !== "function") return;
+      try { await audio.setSinkId(id); } catch (_) {}
+    },
+  };
+
+  window.OA = { nav, footer, toast, getJSON, postAction, el, setNavDot, fmt, healthCheck, onHealth, devices };
 })();

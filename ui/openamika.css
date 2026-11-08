@@ -103,6 +103,23 @@ code, .mono { font-family: Consolas, "Cascadia Mono", monospace; font-size: .86e
 .oa-nav-links a.active { color: #fff; }
 .oa-nav-links a.active::after { width: 100%; }
 .oa-nav-status { display: flex; align-items: center; gap: 9px; padding-right: 10px; }
+/* narrow screens: the Japanese wordmark and the health label go first; under 560px the links take their own
+   row (About dropped: it's still in the footer) and the bar scrolls away instead of sticking */
+@media (max-width: 1100px) {
+  .oa-nav { padding: 0 10px 0 16px; gap: 12px; }
+  .oa-wordmark .mark-jp { display: none; }
+  .oa-nav-links { gap: 18px; }
+  .oa-nav-links a { font-size: 13.5px; letter-spacing: .08em; }
+  .oa-health { padding: 7px; margin-right: 0; }
+  .oa-health .label { display: none; }
+}
+@media (max-width: 560px) {
+  .oa-nav { position: relative; flex-wrap: wrap; height: auto; padding: 8px 10px 0 14px; row-gap: 2px; }
+  .oa-nav-links { order: 3; flex-basis: 100%; gap: 22px; }
+  .oa-nav-links a.oa-nav-wide { display: none; }
+  .oa-mode button:not(.active) { display: none; }
+  .oa-mode button.active::after { content: " \21C4"; opacity: .6; }
+}
 
 /* system health light — the launcher's green / yellow / red, in the corner of every page */
 .oa-health {
@@ -401,6 +418,12 @@ textarea { resize: vertical; line-height: 1.5; }
 textarea.mono { font-family: Consolas, "Cascadia Mono", monospace; font-size: 13px; }
 select { cursor: pointer; }
 select option, select optgroup { background: #241627; color: var(--pearl); }
+
+/* Use page: mic / camera / speaker pickers under the volume row */
+.device-row { display: flex; gap: 10px 14px; flex-wrap: wrap; margin-top: 12px; }
+.device-row label { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); flex: 1 1 180px; min-width: 0; }
+.device-row select { flex: 1; min-width: 0; padding: 5px 10px; font-size: 13px; border-radius: 9999px; text-overflow: ellipsis; }
+.device-row label[hidden] { display: none; }
 
 /* tag pill */
 .tag {
