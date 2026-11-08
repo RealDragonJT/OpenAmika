@@ -43,7 +43,7 @@
         <a href="/use" data-page="use">Use</a>
         <a href="/about" data-page="about" class="oa-nav-wide">About</a>
       </div>
-      <div style="display:flex;align-items:center;">
+      <div class="oa-nav-controls">
         <div class="oa-mode" title="Simple hides the expert controls; Professional shows everything">
           <button type="button" data-mode="simple">Simple</button>
           <button type="button" data-mode="pro">Professional</button>
@@ -58,10 +58,31 @@
     // on a phone only the current mode shows (one chip): tapping it switches to the other
     const compactMode = window.matchMedia("(max-width: 760px)");
     el.querySelectorAll(".oa-mode button").forEach((b) =>
-      b.addEventListener("click", () => applyMode(compactMode.matches && b.classList.contains("active")
-        ? (b.dataset.mode === "pro" ? "simple" : "pro") : b.dataset.mode)));
+      b.addEventListener("click", () => {
+        applyMode(compactMode.matches && b.classList.contains("active")
+          ? (b.dataset.mode === "pro" ? "simple" : "pro") : b.dataset.mode);
+        fitNav();
+      }));
     document.body.prepend(el);
     applyMode(uiMode());
+    const brand = el.querySelector(".oa-wordmark"), links = el.querySelector(".oa-nav-links");
+    const controls = el.querySelector(".oa-nav-controls");
+    function fitNav() {
+      const style = getComputedStyle(el), gap = parseFloat(style.columnGap) || 0;
+      const available = el.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      const visibleLinks = [...links.children].filter((a) => a.getBoundingClientRect().width);
+      // The links container fills a row when wrapped; measure its contents to avoid a wrap/unwrap feedback loop.
+      const linksWidth = visibleLinks.reduce((sum, a) => sum + a.getBoundingClientRect().width, 0)
+        + (parseFloat(getComputedStyle(links).columnGap) || 0) * Math.max(0, visibleLinks.length - 1);
+      const endsWidth = brand.getBoundingClientRect().width + controls.getBoundingClientRect().width;
+      el.classList.toggle("oa-nav-wrapped", compactMode.matches && endsWidth + linksWidth + 2 * gap > available);
+      el.classList.toggle("oa-nav-stacked", compactMode.matches && endsWidth + gap > available);
+    }
+    const navResize = new ResizeObserver(fitNav);
+    [el, brand, controls, ...links.children].forEach((node) => navResize.observe(node));
+    compactMode.addEventListener("change", fitNav);
+    document.fonts.ready.then(fitNav);
+    fitNav();
     startHealth();
   }
 

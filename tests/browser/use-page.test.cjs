@@ -12,8 +12,8 @@ after(async () => { await browser?.close(); });
 
 // Serve the real UI through routing: no server, models, account, or running stack.
 // Media uses Chromium's synthetic devices. API responses and dialog sockets are fixtures.
-async function open(t, viewport = { width: 1440, height: 900 }) {
-  const context = await browser.newContext({ viewport, permissions: ['camera', 'microphone'] });
+async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFactor = 1) {
+  const context = await browser.newContext({ viewport, deviceScaleFactor, permissions: ['camera', 'microphone'] });
   t.after(() => context.close());
   const page = await context.newPage();
   const errors = [];
@@ -224,8 +224,10 @@ test('compact health indicator is circular and centered, and still opens status 
   const p = await open(t);
   for (const width of [390, 561, 700, 760, 761, 1100]) {
     await p.setViewportSize({ width, height: 900 });
-    const button = await p.locator('#navHealth').boundingBox();
-    const dot = await p.locator('#navHealthLight').boundingBox();
+    // Read both in one frame: wrapping may move the entire control between two awaited reads.
+    const { button, dot } = await p.evaluate(() => ({
+      button: navHealth.getBoundingClientRect().toJSON(), dot: navHealthLight.getBoundingClientRect().toJSON(),
+    }));
     assert.ok(Math.abs(button.width - button.height) < 1, `circle at ${width}px`);
     assert.ok(Math.abs(button.x + button.width / 2 - dot.x - dot.width / 2) < 1, `centered horizontally at ${width}px`);
     assert.ok(Math.abs(button.y + button.height / 2 - dot.y - dot.height / 2) < 1, `centered vertically at ${width}px`);
@@ -236,6 +238,70 @@ test('compact health indicator is circular and centered, and still opens status 
   }
   await p.setViewportSize({ width: 1101, height: 900 });
   assert.equal(await p.locator('#navHealthLabel').isVisible(), true);
+});
+
+test('links wrap only when the active mode needs the space, and wrapped links are centered', async t => {
+  const p = await open(t);
+  const firstSingleRow = {};
+  for (const mode of ['simple', 'pro']) {
+    await p.setViewportSize({ width: 760, height: 900 });
+    if (!(await p.evaluate(mode => document.documentElement.classList.contains('mode-' + mode), mode))) {
+      await p.locator('.oa-mode button.active').click();
+    }
+    for (let width = 320; width <= 760; width += 10) {
+      await p.setViewportSize({ width, height: 900 });
+      await p.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const layout = await p.evaluate(() => {
+        const links = [...document.querySelectorAll('.oa-nav-links a')].filter(e => e.getBoundingClientRect().width);
+        const boxes = links.map(e => e.getBoundingClientRect());
+        const brand = document.querySelector('.oa-wordmark').getBoundingClientRect();
+        return { wrapped: boxes[0].top >= brand.bottom, center: (boxes[0].left + boxes.at(-1).right) / 2,
+          overflow: document.documentElement.scrollWidth > innerWidth };
+      });
+      assert.equal(layout.overflow, false, `${mode} at ${width}px`);
+      if (layout.wrapped) assert.ok(Math.abs(layout.center - width / 2) < 1, `centered links: ${mode} at ${width}px`);
+      else firstSingleRow[mode] ??= width;
+    }
+    assert.ok(firstSingleRow[mode] < 760, `${mode} stays on one row before 760px`);
+  }
+  assert.ok(firstSingleRow.simple < firstSingleRow.pro, 'shorter Simple label leaves room for links sooner');
+  // Resize is not required: changing the mode itself must recompute the layout.
+  await p.setViewportSize({ width: firstSingleRow.simple, height: 900 });
+  await p.locator('.oa-mode button.active').click();
+  assert.equal(await p.locator('.oa-nav').evaluate(e => e.classList.contains('oa-nav-wrapped')), false);
+  await p.locator('.oa-mode button.active').click();
+  assert.equal(await p.locator('.oa-nav').evaluate(e => e.classList.contains('oa-nav-wrapped')), true);
+});
+
+test('painted health dot and ring share a center at different display scales', async t => {
+  for (const scale of [1, 1.25, 1.5, 2]) {
+    const p = await open(t, { width: 650, height: 900 }, scale);
+    await p.waitForFunction(() => navHealthLabel.textContent !== 'Checking…');
+    await p.addStyleTag({ content: '.oa-health .light { transition: none; }' });
+    await p.locator('#navHealthLight').evaluate(e => { e.className = 'light ok'; });
+    const b = await p.locator('#navHealth').boundingBox();
+    const shot = await p.screenshot({ clip: { x: Math.floor(b.x) - 4, y: Math.floor(b.y) - 4, width: Math.ceil(b.width) + 8, height: Math.ceil(b.height) + 8 } });
+    // Decode the actual screenshot in canvas: DOM rectangles alone miss paint-time snapping.
+    const centers = await p.evaluate(async base64 => {
+      const image = new Image(); image.src = 'data:image/png;base64,' + base64; await image.decode();
+      const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+      const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0);
+      const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const dot = [], ring = [];
+      for (let y = 0; y < canvas.height; y++) for (let x = 0; x < canvas.width; x++) {
+        const i = (y * canvas.width + x) * 4, r = data[i], g = data[i + 1], b = data[i + 2];
+        if (g > 130 && g > r * 1.5 && g > b * 1.1) dot.push([x, y]);
+        if (r > 30 && b > r && r > g && g < 65) ring.push([x, y]);
+      }
+      const center = pixels => [0, 1].map(axis => (Math.min(...pixels.map(p => p[axis])) + Math.max(...pixels.map(p => p[axis]))) / 2);
+      return { dot: center(dot), ring: center(ring), counts: [dot.length, ring.length] };
+    }, shot.toString('base64'));
+    assert.ok(centers.counts.every(n => n > 0), 'both circles present in screenshot');
+    // Fractional scaling can round opposite edges differently by one physical pixel.
+    const tolerance = Number.isInteger(scale) ? 0 : 0.5;
+    for (const axis of [0, 1]) assert.ok(Math.abs(centers.dot[axis] - centers.ring[axis]) <= tolerance, `painted center at ${scale}x, axis ${axis}: ${JSON.stringify(centers)}`);
+    await p.close();
+  }
 });
 
 for (const [width, height] of [[320, 740], [390, 844], [844, 390], [1024, 768], [1440, 900]]) {
