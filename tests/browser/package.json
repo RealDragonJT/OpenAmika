@@ -1,0 +1,6 @@
+{
+  "name": "openamika-browser-checks",
+  "private": true,
+  "scripts": { "test": "node --test use-page.test.cjs" },
+  "devDependencies": { "playwright": "1.64.1" }
+}

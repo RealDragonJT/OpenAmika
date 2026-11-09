@@ -48,6 +48,7 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+tests/browser/node_modules/
 
 # ── OS / editor noise ────────────────────────────────────────────────
 .DS_Store

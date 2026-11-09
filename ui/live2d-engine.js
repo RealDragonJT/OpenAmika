@@ -239,6 +239,10 @@
     else persistView();
   }
 
+  // the Use page's lock: while set, a drag, the wheel or a pinch never moves or zooms her (or the doll), and the
+  // wheel / a finger fall through to the page so it scrolls
+  let viewLocked = false;
+
   function setupDragZoom() {
     let dragging = false, target = null, dragStartX = 0, dragStartY = 0, modelStartX = 0, modelStartY = 0;
     let pinchStartDist = 0, pinchStartScale = 1;
@@ -249,7 +253,7 @@
       return true;
     };
     const move = (x, y) => {
-      if (!dragging || !target) return;
+      if (!dragging || !target || viewLocked) return;
       target.x = modelStartX + (x - dragStartX);
       target.y = modelStartY + (y - dragStartY);
     };
@@ -258,10 +262,11 @@
       dragging = false; areaEl.style.cursor = "";
       persistTarget(target);
     };
-    areaEl.addEventListener("mousedown", (e) => { if (begin(e.clientX, e.clientY)) areaEl.style.cursor = "grabbing"; });
+    areaEl.addEventListener("mousedown", (e) => { if (!viewLocked && begin(e.clientX, e.clientY)) areaEl.style.cursor = "grabbing"; });
     document.addEventListener("mousemove", (e) => move(e.clientX, e.clientY));
     document.addEventListener("mouseup", end);
     areaEl.addEventListener("wheel", (e) => {
+      if (viewLocked) return;
       const t = pickTarget(e.clientX, e.clientY);
       if (!t) return;
       e.preventDefault();
@@ -271,7 +276,7 @@
       persistTarget(t);
     }, { passive: false });
     areaEl.addEventListener("touchstart", (e) => {
-      if (!live2dModel) return;
+      if (!live2dModel || viewLocked) return;
       if (e.touches.length === 2) {
         if (!target) target = pickTarget(e.touches[0].clientX, e.touches[0].clientY);
         const dx = e.touches[0].clientX - e.touches[1].clientX;
@@ -283,7 +288,7 @@
       }
     }, { passive: false });
     areaEl.addEventListener("touchmove", (e) => {
-      if (!target) return;
+      if (!target || viewLocked) return;
       if (e.touches.length === 2 && pinchStartDist > 0) {
         const dx = e.touches[0].clientX - e.touches[1].clientX;
         const dy = e.touches[0].clientY - e.touches[1].clientY;
@@ -608,6 +613,8 @@
     wsGainNode.connect(wsAnalyser);
     wsGainNode.connect(outputVolumeAnalyser);
     wsGainNode.connect(wsAudioContext.destination);
+    const sink = safeGet("openamika-speakerDevice");
+    if (sink && typeof wsAudioContext.setSinkId === "function") wsAudioContext.setSinkId(sink).catch(() => {});
     if (!_wsLipSyncBound) _wsLipSyncBound = () => updateLipSyncFromWS();
     if (pixiApp && pixiApp.ticker) {
       const L = (PIXI.UPDATE_PRIORITY && PIXI.UPDATE_PRIORITY.LOW) != null ? PIXI.UPDATE_PRIORITY.LOW : -100;
@@ -1264,11 +1271,17 @@
       safeSet("openamika-outputGain", String(g));
       if (wsGainNode) wsGainNode.gain.value = g;
     },
+    // her voice through another speaker ("" = the system default); true when the browser took it
+    async setOutputDevice(id) {
+      if (!wsAudioContext || typeof wsAudioContext.setSinkId !== "function") return true;   // applied when the context starts
+      try { await wsAudioContext.setSinkId(id || ""); return true; } catch (_) { return false; }
+    },
     setLipSyncGain(v) {
       const g = Math.max(0.1, Math.min(5, Number(v) || 1.5));
       lipSyncCalibration.sensitivity = g;
       safeSet("openamika-lipSyncGain", String(g));
     },
+    setLocked(on) { viewLocked = !!on; },
     resetView() {
       if (currentId) {
         try { localStorage.removeItem("openamika-avatar-view-" + currentId); } catch (_) {}
