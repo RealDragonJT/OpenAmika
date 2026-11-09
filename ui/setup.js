@@ -111,21 +111,36 @@
   });
 
   // ── danger zone (bottom of the page): wipe her memory / reset everything ──
-  async function dangerAction(route, action, word, inputId, buttonId, done) {
-    const input = $(inputId), button = $(buttonId), note = $("dangerNote");
+  // The first attempt waits up to WIPE_WAIT_S for her to finish (one short wait). If she is still busy, the answer
+  // says what runs and the Force button appears: she stops what she is doing, and nothing still running can refuse it.
+  // The backup is kept either way (2026-11-09).
+  const WIPE_WAIT_S = 12;
+  async function dangerAction(route, action, word, inputId, buttonId, forceLabel, done, force) {
+    const input = $(inputId), button = $(buttonId), note = $("dangerNote"), forceBtn = $("dangerForce");
     if (input.value.trim() !== word) { toast("Type " + word + " to confirm.", true); input.focus(); return; }
     button.disabled = true;
-    note.textContent = "Working… (she has to be idle: the stage is disconnected while this runs)";
+    forceBtn.hidden = true;
+    note.textContent = force ? "Stopping her and working… (the stage is disconnected while this runs)"
+      : "Working… if she is still talking, this waits up to " + WIPE_WAIT_S + " s for her to finish (the stage is disconnected while this runs)";
     try {
       const response = await fetch(route, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Build-F-Action": action },
-        body: JSON.stringify({ confirmation: word }),
+        body: JSON.stringify(force ? { confirmation: word, force: true } : { confirmation: word, wait_s: WIPE_WAIT_S }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const detail = payload.detail || payload.error || ("HTTP " + response.status);
-        throw new Error(response.status === 409 ? detail + " Power her off on the Use page, wait a few seconds, and try again." : detail);
+        const detail = payload.detail;
+        const message = (detail && typeof detail === "object" ? detail.message : detail) || payload.error || ("HTTP " + response.status);
+        if (response.status === 409 && !force) {
+          note.textContent = message;
+          forceBtn.textContent = forceLabel;
+          forceBtn.onclick = () => dangerAction(route, action, word, inputId, buttonId, forceLabel, done, true);
+          forceBtn.hidden = false;
+          toast(message, true);
+          return;
+        }
+        throw new Error(message);
       }
       input.value = "";
       note.textContent = done(payload);
@@ -139,8 +154,10 @@
     } finally { button.disabled = false; }
   }
   $("wipeBtn").addEventListener("click", () => dangerAction("/api/build_f/wipe", "wipe-memory", "WIPE", "wipeConfirm", "wipeBtn",
+    "Force wipe (she stops what she is doing)",
     (p) => "Memory wiped. Backup " + (p.backup_id || "kept") + " under memory_f/backups/."));
   $("resetBtn").addEventListener("click", () => dangerAction("/api/build_f/reset", "reset-all", "RESET", "resetConfirm", "resetBtn",
+    "Force reset (she stops what she is doing)",
     (p) => "Reset done: memory backup " + (p.backup_id || "kept") + " · restored " + ((p.restored || []).join(", ") || "nothing") +
            " · names and city cleared. Open the Use page — she will introduce herself again."));
 
@@ -178,6 +195,7 @@
     $("provOllama").querySelector("span").textContent = onOllama && !onCloud ? "in use · fully local · a 27B+ model" : "fully local · a 27B+ model · a 32 GB GPU or a second PC";
     $("orBackNote").hidden = !onOllama;
     if (!provChosen) showProvider(onOllama && !onCloud ? "ollama" : "openrouter");
+    if (kinds.has("openrouter")) loadCatalog(); else $("orGoneNote").hidden = true;
 
     const grid = $("roleGrid");
     grid.replaceChildren();
@@ -220,13 +238,56 @@
   }
   $("provOpenrouter").addEventListener("click", () => { provChosen = true; showProvider("openrouter"); });
   $("provOllama").addEventListener("click", () => { provChosen = true; showProvider("ollama"); loadOllama(); });
-  $("orBack").addEventListener("click", async () => {
+
+  // A model switch refused as busy (409, e.g. after a local model crashed mid-answer) shows what runs and an Unlock
+  // button: Unlock stops what she is doing and clears what a crash left behind, then the same switch goes again with
+  // force (what was in flight keeps its model; new calls take the new one).
+  async function switchModels(route, action, body, done) {
+    const note = $("modelBusyNote");
+    note.hidden = true;
     try {
-      const r = await postAction("/api/build_f/preset", "apply-preset", { provider: "openrouter" });
+      done(await postAction(route, action, body));
+    } catch (error) {
+      if (error.status !== 409) { toast(String(error.message || error), true); return; }
+      const unlock = el("button", { type: "button", class: "btn small", text: "Unlock" });
+      unlock.addEventListener("click", async () => {
+        unlock.disabled = true;
+        note.textContent = "Unlocking… (she stops what she is doing)";
+        try {
+          const u = await postAction("/api/build_f/unlock", "unlock", {});
+          done(await postAction(route, action, { ...body, force: true }, { "X-Build-F-Force": "1" }));
+          note.textContent = "Unlocked and switched." + (u.retired_requests ? " Cleared " + u.retired_requests + " request(s) a crash had left open." : "");
+        } catch (unlockError) {
+          note.textContent = String(unlockError.message || unlockError);
+        }
+      });
+      note.replaceChildren(document.createTextNode(String(error.message || error) + " "), unlock);
+      note.hidden = false;
+      toast(String(error.message || error), true);
+    }
+  }
+
+  function backToPreset() {
+    switchModels("/api/build_f/preset", "apply-preset", { provider: "openrouter" }, (r) => {
       toast("Back on OpenRouter: " + (r.applied_preset || "preset applied") + ".");
       loadModels();
-    } catch (error) { toast(String(error.message || error), true); }
-  });
+    });
+  }
+  $("orBack").addEventListener("click", backToPreset);
+  $("orGoneBack").addEventListener("click", backToPreset);
+
+  // a model chosen here that OpenRouter no longer offers makes every reply fail: say which, offer the preset back
+  async function loadCatalog() {
+    try {
+      const c = await getJSON("/api/build_f/openrouter/catalog");
+      const gone = c.checked ? (c.missing || []) : [];
+      $("orGoneText").textContent = gone.length
+        ? "OpenRouter no longer offers " + gone.map((x) => x.model + " (" + x.role + ")").join(", ") + ": every reply that needs it fails." +
+          ((c.preset_missing || []).length ? " (The preset names a model that is gone too: update OpenAmika.)" : "")
+        : "";
+      $("orGoneNote").hidden = !gone.length;
+    } catch (_) { $("orGoneNote").hidden = true; }
+  }
 
   let ollamaInfo = null;
   function olModelLabel(m) {
@@ -252,6 +313,7 @@
     select.replaceChildren(...(n ? (ollamaInfo.models || []).map((m) => el("option", { value: m.name, text: olModelLabel(m) }))
                                  : [el("option", { value: "", text: "— detect models first —" })]));
     if (current) select.value = current;
+    warnSmallModel();
     $("olUse").disabled = !n;
     const roles = Object.keys(inUse);
     $("olNote").textContent = roles.length === 4 ? "All four roles run on " + (new Set(Object.values(inUse)).size === 1 ? current : "local models") + "."
@@ -268,33 +330,54 @@
     } catch (error) { $("olStatus").textContent = String(error.message || error); toast(String(error.message || error), true); }
     finally { $("olDetect").disabled = false; }
   });
-  $("olUse").addEventListener("click", async () => {
+  // under 27B parameters she does not hold her character (common.js smallModelWarning)
+  function warnSmallModel() {
+    const model = ((ollamaInfo && ollamaInfo.models) || []).find((m) => m.name === $("olModel").value);
+    const text = window.OA.smallModelWarning ? window.OA.smallModelWarning(model) : "";
+    $("olWarn").textContent = text;
+    $("olWarn").hidden = !text;
+    return text;
+  }
+  $("olModel").addEventListener("change", warnSmallModel);
+  $("olUse").addEventListener("click", () => {
     const model = $("olModel").value;
     if (!model) { toast("Detect models first.", true); return; }
-    try {
-      const r = await postAction("/api/build_f/ollama/use", "ollama-use", { model });
-      toast("She now thinks locally on " + model + " — fully local." + (r.transport === "ollama" ? "" : " (" + r.transport + ")"));
+    const warning = warnSmallModel();
+    switchModels("/api/build_f/ollama/use", "ollama-use", { model }, (r) => {
+      toast("She now thinks locally on " + model + " — fully local." + (r.transport === "ollama" ? "" : " (" + r.transport + ")") +
+            (warning ? " " + warning : ""), !!warning);
       loadModels(); loadOllama();
-    } catch (error) { toast(String(error.message || error), true); }
+    });
   });
 
   // ── OpenRouter API key ──
+  // the saved key with its balance: OpenRouter is prepaid, so a key on an account without credits is not enough
+  function showKey(k) {
+    const line = $("orKeyStatus");
+    if (!k.present) { line.textContent = "No key saved yet — paste one to bring her online."; line.style.color = ""; return; }
+    const b = window.OA.keyBalance ? window.OA.keyBalance(k) : { level: "ok", text: "" };
+    line.textContent = (b.level === "ok" ? "Saved ✓ " : "Saved ✗ ") + (k.hint || "") + (b.text ? " · " + b.text : "");
+    line.style.color = b.level === "ok" ? "" : "var(--err)";
+  }
   async function loadKey() {
     try {
-      const k = await getJSON("/api/build_f/openrouter_key");
-      $("orKeyStatus").textContent = k.present ? "Saved ✓ " + (k.hint || "") : "No key saved yet — paste one to bring her online.";
+      showKey(await getJSON("/api/build_f/openrouter_key?credits=1"));
     } catch (_) { $("orKeyStatus").textContent = "key status unavailable (is the brain running?)"; }
   }
   loadKey();
   $("orKeySave").addEventListener("click", async () => {
     const key = $("orKeyInput").value.trim();
     if (!key) { toast("Paste your OpenRouter key first (sk-or-…).", true); return; }
+    $("orKeySave").disabled = true;
+    $("orKeyStatus").textContent = "saving and asking OpenRouter for the balance…";
     try {
       const result = await postAction("/api/build_f/openrouter_key", "openrouter-key", { key });
       $("orKeyInput").value = "";
-      toast(result.note || "Key saved.");
-      loadKey();
-    } catch (error) { toast(String(error.message || error), true); }
+      showKey(result);
+      const b = window.OA.keyBalance ? window.OA.keyBalance(result) : { level: "ok" };
+      toast(result.note || "Key saved.", b.level !== "ok");
+    } catch (error) { toast(String(error.message || error), true); loadKey(); }
+    finally { $("orKeySave").disabled = false; }
   });
 
   $("modelsSave").addEventListener("click", async () => {
@@ -303,19 +386,16 @@
       const select = $("role_" + role);
       if (select) selections[role] = select.value;
     }
-    try {
-      await postAction("/api/build_f/models", "select-models", { selections });
+    switchModels("/api/build_f/models", "select-models", { selections }, () => {
       toast("Model choices saved.");
       loadModels();
-    } catch (error) { toast(String(error.message || error), true); }
+    });
   });
-  $("presetApply").addEventListener("click", async () => {
-    try {
-      await postAction("/api/build_f/preset", "apply-preset", { preset: $("presetSelect").value });
+  $("presetApply").addEventListener("click", () => switchModels("/api/build_f/preset", "apply-preset",
+    { preset: $("presetSelect").value }, () => {
       toast("Preset applied.");
       loadModels();
-    } catch (error) { toast(String(error.message || error), true); }
-  });
+    }));
 
   // ───────────────────── voice adapter ─────────────────────
   let vmap = null;
@@ -662,6 +742,20 @@
       await hearAudio.play();
     } catch (error) { toast("Her voice is unavailable: " + (error.message || error), true); }
     finally { $("pHear").disabled = false; }
+  });
+
+  // her silence remarks ("you're quiet"): off / rare / normal, counted from the moment her voice stops
+  function showSilence(r) {
+    $("pSilence").value = r.silence_remarks || "normal";
+    $("pSilenceNote").textContent = r.interval_s ? "After about " + r.interval_s + " s of quiet, counted from the moment her voice stops."
+      : "She does not remark on silences.";
+  }
+  getJSON("/api/build_f/conversation").then(showSilence).catch(() => { $("pSilenceNote").textContent = "unavailable (is the brain running?)"; });
+  $("pSilence").addEventListener("change", async () => {
+    try {
+      showSilence(await postAction("/api/build_f/conversation", "conversation", { silence_remarks: $("pSilence").value }));
+      toast("Saved — applies at once.");
+    } catch (error) { toast(String(error.message || error), true); }
   });
 
   $("pSave").addEventListener("click", async () => {

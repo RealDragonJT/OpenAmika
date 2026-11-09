@@ -232,7 +232,7 @@ def reload_template():
     _template_cache = po_contract.read_text_bom(path).strip()
     if not _template_cache:
         raise ValueError(f"{TEMPLATE_FILE} 内容为空")
-    print(f"[Hane] 模板已加载: {TEMPLATE_FILE} ({len(_template_cache)} 字符)")
+    print(f"[Hane] deep template loaded: {TEMPLATE_FILE} ({len(_template_cache)} characters)")
 
 
 def load_surface_template() -> str:
@@ -248,7 +248,7 @@ def reload_surface_template():
     if not path.exists():
         raise FileNotFoundError(f"表层模板不存在: {SURFACE_TEMPLATE_FILE}")
     _surface_template_cache = po_contract.read_text_bom(path).strip()
-    print(f"[Hane] 表层模板已加载: {SURFACE_TEMPLATE_FILE} ({len(_surface_template_cache)} 字符)")
+    print(f"[Hane] surface template loaded: {SURFACE_TEMPLATE_FILE} ({len(_surface_template_cache)} characters)")
 
 
 def load_thinking_template() -> str:
@@ -264,7 +264,7 @@ def reload_thinking_template():
     if not path.exists():
         raise FileNotFoundError(f"思考层模板不存在: {THINKING_TEMPLATE_FILE}")
     _thinking_template_cache = po_contract.read_text_bom(path).strip()
-    print(f"[Hane] 思考层模板已加载: {THINKING_TEMPLATE_FILE} ({len(_thinking_template_cache)} 字符)")
+    print(f"[Hane] reflection template loaded: {THINKING_TEMPLATE_FILE} ({len(_thinking_template_cache)} characters)")
 
 
 def run_template_check() -> dict:
@@ -392,6 +392,12 @@ CITY = ""
 # 最近一条对方消息的渠道：""=舞台（语音/打字，他在家），"discord"/"telegram"=文字消息（他不在身边，她在手机上看）。
 # 决定 scenes 用 current_scene 还是 text_scene；ws_message 每条消息刷新。
 _CURRENT_CHANNEL = ""
+# False when the stage has her voice off (the speech server sends "voice": false): her reply is read, not heard.
+_CURRENT_VOICE = True
+# A spoken reply stays short (2026-11-09, item 16): about four sentences unless he asks for a story or for more. Text
+# (Discord / Telegram, or the page with her voice off) keeps the long form. Prompt only: no code cuts her reply. It
+# opens the deep's per-turn instruction ({deep_instruction}, after the cached prefix), so the cache is unaffected.
+VOICE_REPLY_NOTE = "这一轮是开口说给对方听的：说出口的话加起来四句左右就够了，除非对方要你讲个故事、或者明确想听你多讲一些；"
 # 历史里相邻两轮隔了超过这么多分钟，就插一行「（——中间隔了…——）」；f_bridge 按 history_gap_minutes 覆盖。
 # 0 或负数关掉所有时间行。
 HISTORY_GAP_MINUTES = 20
@@ -432,7 +438,7 @@ def _load_model_prefs():
     except FileNotFoundError:
         return
     except Exception as e:
-        print(f"[Hane] 读取模型偏好失败: {e}")
+        print(f"[Hane] could not read the model preferences: {e}")
         return
     if d.get("surface") in AVAILABLE_MODELS:
         DEFAULT_SURFACE_MODEL = d["surface"]
@@ -440,7 +446,7 @@ def _load_model_prefs():
         DEFAULT_DEEP_MODEL = d["deep"]
     if d.get("thinking") in AVAILABLE_MODELS:
         DEFAULT_THINKING_MODEL = d["thinking"]
-    print(f"[Hane] 模型偏好已载入: 表层={DEFAULT_SURFACE_MODEL} 深层={DEFAULT_DEEP_MODEL} 思考={DEFAULT_THINKING_MODEL}")
+    print(f"[Hane] model preferences loaded: surface={DEFAULT_SURFACE_MODEL} deep={DEFAULT_DEEP_MODEL} reflection={DEFAULT_THINKING_MODEL}")
 
 
 def _save_model_prefs():
@@ -452,7 +458,7 @@ def _save_model_prefs():
              "thinking": DEFAULT_THINKING_MODEL}, ensure_ascii=False, indent=2),
             encoding="utf-8")
     except Exception as e:
-        print(f"[Hane] 保存模型偏好失败: {e}")
+        print(f"[Hane] could not save the model preferences: {e}")
 
 
 _load_model_prefs()   # 开机即读回上次选择（AVAILABLE_MODELS/默认都已在上面定义好）
@@ -535,7 +541,7 @@ def _init_current_cp():
         with _hist_lock:
             existing = [t for t in CONVERSATION_HISTORY if t.get("checkpoint") == _CURRENT_CP]
         _CURRENT_TURN_NUM = len(existing)
-    print(f"[Hane] 当前检查点: {_CURRENT_CP}, 已有 {_CURRENT_TURN_NUM} 轮")
+    print(f"[Hane] current checkpoint: {_CURRENT_CP}, {_CURRENT_TURN_NUM} turn(s) so far")
 
 def _session_minutes(h: int, m: int = 0) -> int:
     """将小时+分钟转为会话内分钟数（5点=0, 6点=60, ..., 4点=1380）用于顺序比较"""
@@ -566,20 +572,20 @@ def _catchup_range(from_h: int, from_cp: int, to_h: int, to_cp: int):
                 _CURRENT_CP = _make_raw_cp(_session_date(), nh, ncp)
                 _CURRENT_TURN_NUM = 0
 
-            print(f"[Hane] 检查点推进 → {_CURRENT_CP}")
+            print(f"[Hane] checkpoint advanced → {_CURRENT_CP}")
 
             if turns:
                 history = _build_history_from_turns(turns)
-                print(f"[Hane] 整理 10min {ck} ({len(turns)} 轮)")
+                print(f"[Hane] consolidating 10min {ck} ({len(turns)} turn(s))")
                 ok = _run_consolidation("10min", ck, history_override=history)
                 if not ok:
-                    print(f"[Hane] 重试 10min {ck}")
+                    print(f"[Hane] retrying 10min {ck}")
                     _time.sleep(3)
                     ok = _run_consolidation("10min", ck, history_override=history)
                 if ok:
                     _mark_cp_done(ck)
                 else:
-                    print(f"[Hane] 整理 {ck} 最终失败，跳过")
+                    print(f"[Hane] consolidating {ck} failed for good: skipped")
             else:
                 _mark_cp_done(ck)
         else:
@@ -600,7 +606,7 @@ def _startup_catchup():
         today_turns = [t for t in CONVERSATION_HISTORY
                        if _session_date_from_ts(t.get("ts", "1970-01-01 12:00:00")) == sd]
     if not today_turns:
-        print("[Hane] 启动检查: 当前会话无对话记录，跳过")
+        print("[Hane] start check: no conversation in this session yet: skipped")
         return
 
     latest = today_turns[-1]
@@ -612,14 +618,14 @@ def _startup_catchup():
 
     trigger_min = latest_cp * 10 - 1
     if _session_minutes(now.hour, now.minute) < _session_minutes(latest_h, trigger_min):
-        print(f"[Hane] 启动检查: 最新检查点 {latest_ck} 尚未到触发时间，跳过")
+        print(f"[Hane] start check: the latest checkpoint {latest_ck} is not due yet: skipped")
         return
 
     to_h = now.hour
     to_cp = now.minute // 10 + 1
-    print(f"[Hane] 启动补整理: 从 {latest_ck} 到 {to_h} {to_cp}")
+    print(f"[Hane] catching up at start: from {latest_ck} to {to_h} {to_cp}")
     _catchup_range(latest_h, latest_cp, to_h, to_cp)
-    print("[Hane] 启动补整理完成")
+    print("[Hane] catching up at start: done")
 
 
 def _session_date(now: datetime = None) -> str:
@@ -645,9 +651,9 @@ def _load_history():
             with _hist_lock:
                 CONVERSATION_HISTORY.clear()
                 CONVERSATION_HISTORY.extend(data.get("turns", []))
-            print(f"[Hane] 对话记录已加载: {len(CONVERSATION_HISTORY)} 轮")
+            print(f"[Hane] conversation history loaded: {len(CONVERSATION_HISTORY)} turn(s)")
         except Exception as e:
-            print(f"[Hane] 对话记录加载失败: {e}")
+            print(f"[Hane] could not load the conversation history: {e}")
 
 
 # R21：json.dumps 在 _hist_lock 里做（快照一致），写盘（.tmp + os.replace）在 _hist_lock 外做。
@@ -687,7 +693,7 @@ def _save_history():
                 os.replace(tmp, MEMORY_FILE)
             except OSError as e:
                 # Windows 上目标文件被占用时 replace 会失败：退回直接覆盖（与旧行为一致）。
-                print(f"[Hane] 对话记录原子替换失败，改为直接写入: {e}")
+                print(f"[Hane] could not replace the conversation history in one step, writing it directly: {e}")
                 MEMORY_FILE.write_text(payload, encoding="utf-8")
                 with contextlib.suppress(OSError):
                     tmp.unlink()
@@ -716,10 +722,10 @@ def _load_consolidated():
                         h = int(parts[0])
                         for i in range(1, 7):
                             _COMPLETED_CPS.add(f"{h} {i}")
-            print(f"[Hane] 整理记忆已加载: {len(CONSOLIDATED_MEMORIES)} 条, "
-                  f"已完成检查点: {len(_COMPLETED_CPS)} 个")
+            print(f"[Hane] consolidated memories loaded: {len(CONSOLIDATED_MEMORIES)}, "
+                  f"checkpoints done: {len(_COMPLETED_CPS)}")
         except Exception as e:
-            print(f"[Hane] 整理记忆加载失败: {e}")
+            print(f"[Hane] could not load the consolidated memories: {e}")
 
 
 def _save_consolidated():
@@ -739,9 +745,9 @@ def _load_thinking_log():
             with _think_lock:
                 THINKING_LOG.clear()
                 THINKING_LOG.extend(data.get("entries", []))
-            print(f"[Hane] 思考层日志已加载: {len(THINKING_LOG)} 条")
+            print(f"[Hane] reflection log loaded: {len(THINKING_LOG)} entries")
         except Exception as e:
-            print(f"[Hane] 思考层日志加载失败: {e}")
+            print(f"[Hane] could not load the reflection log: {e}")
 
 
 def _save_thinking_log():
@@ -862,7 +868,7 @@ def mark_turn_interrupted(turn_id: str, surface_partial: str = "",
             t["deep_raw"] = deep_partial
         t["interrupted"] = True
     _save_history()
-    print(f"[Hane] 打断 turn {turn_id}")
+    print(f"[Hane] interrupted turn {turn_id}")
 
 
 def discard_turn(turn_id: str) -> bool:
@@ -875,7 +881,7 @@ def discard_turn(turn_id: str) -> bool:
         else:
             return False
     _save_history()
-    print(f"[Hane] 丢弃 turn {turn_id}")
+    print(f"[Hane] dropped turn {turn_id}")
     return True
 
 
@@ -1439,6 +1445,11 @@ def _tidy_dynamic(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text)
 
 
+def _voice_reply_note() -> str:
+    """VOICE_REPLY_NOTE when this turn's reply will be spoken (the stage with her voice on), else ""."""
+    return VOICE_REPLY_NOTE if not _CURRENT_CHANNEL and _CURRENT_VOICE else ""
+
+
 def build_messages(user_message: str, blurted_reply: str = None, reply_lang: str = None,
                    reply_lang_reason: str = "detected") -> dict:
     """
@@ -1473,6 +1484,7 @@ def build_messages(user_message: str, blurted_reply: str = None, reply_lang: str
     else:
         instruction = DEEP_INSTRUCTION_NORMAL
         user_content = USER_CONTENT_NORMAL
+    instruction = _voice_reply_note() + instruction
 
     blurt_block = ""
     if has_blurt:
@@ -1833,7 +1845,7 @@ def run_thinking_once(deep_request: str = "", on_guidance=None,
                     try:
                         on_guidance(parse_thinking_response(norm[:am.start()]))
                     except Exception as e:
-                        print(f"[Hane] 思考层 on_guidance 回调出错: {e}")
+                        print(f"[Hane] reflection on_guidance callback failed: {e}")
                     break
 
     parsed = parse_thinking_response(raw)
@@ -1842,7 +1854,7 @@ def run_thinking_once(deep_request: str = "", on_guidance=None,
         try:
             on_guidance(parsed)
         except Exception as e:
-            print(f"[Hane] 思考层 on_guidance 回调出错: {e}")
+            print(f"[Hane] reflection on_guidance callback failed: {e}")
 
     with _hist_lock:
         if target_turn_id is not None:
@@ -1915,16 +1927,16 @@ def _maybe_fire_open(open_content: str):
         return False
     sid = _LAST_SID
     if not sid:
-        print("[Hane] 开口：无活跃客户端，跳过主动发声")
+        print("[Hane] speaking first: no page connected: skipped")
         return False
     with _ws_active_lock:
         busy = bool(_ws_active)
     if busy:
-        print("[Hane] 开口：有生成在进行，跳过本次主动发声")
+        print("[Hane] speaking first: a reply is being written: skipped this time")
         return False
     cue = _wrap_open_cue(open_content)
     tid = _start_open_gen(sid, cue, DEFAULT_SURFACE_MODEL, DEFAULT_DEEP_MODEL)
-    print(f"[Hane] 开口：已起主动发声轮 {tid}" if tid else "[Hane] 开口：未起主动发声轮（已关闭或无内容）")
+    print(f"[Hane] speaking first: started turn {tid}" if tid else "[Hane] speaking first: no turn started (switched off, or nothing to say)")
     return tid or False
 
 
@@ -1959,7 +1971,7 @@ def trigger_thinking_async(deep_request: str = "", target_turn_id: str = None,
         return False
     with _think_state_lock:
         if _thinking_inflight >= _THINKING_MAX:
-            print(f"[Hane] 思考层并发已满（{_THINKING_MAX}），跳过本次触发（{reason}）")
+            print(f"[Hane] reflection busy ({_THINKING_MAX} running): skipped this trigger ({reason})")
             return False
         _thinking_inflight += 1
         _pending_seq += 1
@@ -1977,10 +1989,10 @@ def trigger_thinking_async(deep_request: str = "", target_turn_id: str = None,
             entry = run_thinking_once(deep_request=deep_request,
                                       target_turn_id=target_turn_id)
             ch = entry.get("channels") or "-"
-            print(f"[Hane] 思考层完成（{reason}），通道={ch}，"
-                  f"挂到轮次={entry.get('after_turn_id')}")
+            print(f"[Hane] reflection done ({reason}), channels={ch}, "
+                  f"after turn={entry.get('after_turn_id')}")
         except Exception as e:
-            print(f"[Hane] 思考层后台运行出错（{reason}）: {e}")
+            print(f"[Hane] reflection failed in the background ({reason}): {e}")
         finally:
             with _think_state_lock:
                 _thinking_inflight -= 1
@@ -2049,9 +2061,9 @@ def _fire_pending_continue(turn_id: str) -> None:
         return
     sid = req.get("sid") or _LAST_SID
     if not sid:
-        print("[Hane] 【接着说】无可用 sid，跳过自续说")
+        print("[Hane] keep-talking marker: no page connected: skipped")
         return
-    print(f"[Hane] 【接着说】turn {turn_id} 音频已播完 → 起自续说轮")
+    print(f"[Hane] keep-talking marker: turn {turn_id} finished playing → starting her follow-up turn")
     _start_continue_gen(sid)
 
 
@@ -2418,7 +2430,7 @@ def _run_consolidation(level: str, checkpoint: str,
                        history_override: str = None):
     """旧版分时段整理（记忆1.txt）已移除（R22）；F 证据库逐轮写入取代它。
     这里只保留入口，供仍被 f_bridge 停用的补整理/自动整理代码安全调用。"""
-    print(f"[Hane] 旧版记忆整理已停用，跳过 {level} {checkpoint}")
+    print(f"[Hane] the old memory consolidation is off: skipped {level} {checkpoint}")
     return False
 
 
@@ -2530,7 +2542,7 @@ def _try_hour_consolidation(hour: int):
                 turns = _get_turns_for_checkpoint(ck)
                 if turns:
                     history = _build_history_from_turns(turns)
-                    print(f"[Hane] 小时整理前补救 10min {ck}")
+                    print(f"[Hane] catching up 10min {ck} before the hourly consolidation")
                     ok = _run_consolidation("10min", ck, history_override=history)
                     if ok:
                         _mark_cp_done(ck)
@@ -2542,7 +2554,7 @@ def _try_hour_consolidation(hour: int):
         if has_any:
             history = _build_history_from_memories(cps, level="10min")
             hour_cp = f"{hour} 0"
-            print(f"[Hane] 链式触发: hour {hour_cp}")
+            print(f"[Hane] chained trigger: hour {hour_cp}")
             _run_consolidation("hour", hour_cp, hour=hour, history_override=history)
     _try_period_consolidation(_get_period(hour))
 
@@ -2573,7 +2585,7 @@ def _try_period_consolidation(period_name: str):
         return
     history = _build_history_from_memories(hour_cps, level="hour")
     period_cp = f"period_{period_name}"
-    print(f"[Hane] 链式触发: period {period_name}")
+    print(f"[Hane] chained trigger: period {period_name}")
     _run_consolidation("period", period_cp, period_name=period_name,
                        hour=start_h, history_override=history)
 
@@ -2589,7 +2601,7 @@ def _auto_consolidation_loop():
             sd = _session_date(now)
 
             if sd != _current_session:
-                print(f"[Hane] 会话日期变化 {_current_session} → {sd}，重置检查点状态")
+                print(f"[Hane] the session date changed {_current_session} → {sd}: checkpoints reset")
                 _COMPLETED_CPS.clear()
                 last_triggered_cp = None
                 _current_session = sd
@@ -2609,7 +2621,7 @@ def _auto_consolidation_loop():
                 last_triggered_cp = cp_id
 
         except Exception as e:
-            print(f"[Hane] 自动整理循环异常: {e}")
+            print(f"[Hane] the auto-consolidation loop failed: {e}")
 
         _time.sleep(5)
 
@@ -2725,7 +2737,7 @@ def set_relationship_stage():
     if not (0 <= idx < len(stages)):
         return jsonify({"error": f"阶段索引 {idx} 超出范围 0-{len(stages)-1}"}), 400
     _RELATIONSHIP_STAGE = idx
-    print(f"[Hane] 关系阶段切换 → {stages[idx]['name']}")
+    print(f"[Hane] relationship stage → {stages[idx]['name']}")
     return jsonify({"current": _RELATIONSHIP_STAGE, "name": stages[idx]["name"]})
 
 
@@ -2741,7 +2753,7 @@ def clear_memory():
         THINKING_LOG.clear()
         _save_thinking_log()
     _init_current_cp()
-    print("[Hane] 记忆已清空")
+    print("[Hane] memory wiped")
     return jsonify({"status": "ok"})
 
 
@@ -2800,6 +2812,17 @@ _LAST_SID: str | None = None
 # ── 空闲节奏：对方一段时间没接话，就借「深层→思考层」通道戳一下，让思考层决定
 #    是直接开口续话、还是铺个新话题再开口；结果照常走思考层的「开口」快通道。
 IDLE_TRIGGER_SECONDS = 30
+# How often she remarks on a silence (build_f.json "silence_remarks"; Setup → You & Amika, applied at once): "normal"
+# after IDLE_TRIGGER_SECONDS of silence, "rare" after three times that, "off" never. f_bridge / f_controls set it.
+SILENCE_REMARKS = "normal"
+SILENCE_REMARK_FACTORS = {"normal": 1, "rare": 3}
+# The silence clock starts when HER VOICE stops (2026-11-09, items 14/16: "start counting when she finishes talking"):
+# a turn's text ends long before its last clip has played, and counting from there had her ask why you are quiet a few
+# seconds after she stopped talking. _voice_pending: turn_id -> monotonic start of every stage turn whose audio has not
+# played out yet; the stage's speech_done (f_bridge → _voice_stopped) ends it. A turn whose speech_done never comes
+# (the page closed mid-sentence) stops holding the clock after VOICE_PENDING_MAX_S.
+VOICE_PENDING_MAX_S = 300
+_voice_pending: dict = {}
 # 预算保护：对方一直不接话时，最多连续主动开口这么多轮，之后等对方先说话再恢复空闲节奏
 # （否则挂着的网页会每三十来秒自问自答一轮，一直计费）。
 IDLE_MAX_UNANSWERED_OPENS = 2
@@ -2811,6 +2834,7 @@ IDLE_DEEP_REQUEST = (
     "（已经三十秒左右没人接话了，有点冷场——我是该直接开口、接着刚才的话头说点什么，"
     "还是干脆铺一个新话题、主动开口带一下节奏？你帮我定一下，然后让我开口。）"
 )
+_IDLE_SPANS = {30: "三十秒", 90: "一分半钟"}
 
 
 def _mark_activity():
@@ -2821,11 +2845,51 @@ def _mark_activity():
         _idle_fired = False
 
 
+def _idle_interval():
+    """Seconds of silence (after her voice stopped) before she may remark on it; None when silence remarks are off."""
+    factor = SILENCE_REMARK_FACTORS.get(SILENCE_REMARKS)
+    return None if factor is None else IDLE_TRIGGER_SECONDS * factor
+
+
+def _idle_deep_request(seconds) -> str:
+    """IDLE_DEEP_REQUEST, saying how long the silence really was."""
+    span = _IDLE_SPANS.get(int(seconds), f"{int(seconds)}秒")
+    return IDLE_DEEP_REQUEST.replace("三十秒", span, 1)
+
+
+def _voice_started(turn_id):
+    """A stage turn begins (her text, then her voice): the silence clock waits for its speech_done."""
+    if turn_id and not _CURRENT_CHANNEL:      # a text channel's reply is delivered when its text ends
+        with _idle_state_lock:
+            _voice_pending[turn_id] = _time.monotonic()
+
+
+def _voice_dropped(turn_id):
+    """A turn that ended without her speaking (cancelled, failed): nothing of it will play."""
+    with _idle_state_lock:
+        _voice_pending.pop(turn_id, None)
+
+
+def _voice_stopped(turn_id=None):
+    """Her voice stopped: speech_done for turn_id, or None when whatever she was saying was cut off (a new message,
+    Unlock, the page went away). That turn and every earlier one not generating anymore are over; the silence clock
+    starts now."""
+    with _ws_active_lock:
+        generating = set(_ws_active)
+    with _idle_state_lock:
+        since = _voice_pending.get(turn_id) if turn_id else None
+        for tid, started in list(_voice_pending.items()):
+            if tid == turn_id or (tid not in generating and (since is None or started <= since)):
+                del _voice_pending[tid]
+    _mark_activity()
+
+
 def _idle_check_and_arm() -> bool:
     """到了该触发空闲节奏吗？到了就置 _idle_fired（本段只触发一次）并返回 True。
-    条件：有活跃客户端、当前没有生成在跑、静默已超阈值、本段还没触发过。"""
+    条件：有活跃客户端、当前没有生成在跑、她的声音已经停了、静默已超阈值、本段还没触发过。"""
     global _idle_fired
-    if not _LAST_SID:
+    interval = _idle_interval()
+    if interval is None or not _LAST_SID:
         return False
     with _ws_active_lock:
         if _ws_active:                  # 她正在说 / 正在生成，不算静默
@@ -2839,27 +2903,34 @@ def _idle_check_and_arm() -> bool:
     if unanswered >= IDLE_MAX_UNANSWERED_OPENS:
         return False
     with _idle_state_lock:
-        idle = _time.monotonic() - _last_activity_ts
-        if idle < IDLE_TRIGGER_SECONDS or _idle_fired:
+        now = _time.monotonic()
+        for tid, started in list(_voice_pending.items()):
+            if now - started > VOICE_PENDING_MAX_S:
+                del _voice_pending[tid]
+        if _voice_pending:              # her voice has not stopped yet: there is no silence to count
+            return False
+        idle = now - _last_activity_ts
+        if idle < interval or _idle_fired:
             return False
         _idle_fired = True
         return True
 
 
 def _idle_watch_loop():
-    """后台节奏：对方 IDLE_TRIGGER_SECONDS 没接话，就借深层通道戳一下思考层。"""
+    """后台节奏：她的声音停下后对方 _idle_interval() 秒没接话，就借深层通道戳一下思考层。"""
     while True:
         _time.sleep(3)
         try:
             if _idle_check_and_arm():
+                seconds = _idle_interval() or IDLE_TRIGGER_SECONDS
                 if trigger_thinking_async(
-                    deep_request=IDLE_DEEP_REQUEST,
-                    reason=f"空闲{IDLE_TRIGGER_SECONDS}秒",
+                    deep_request=_idle_deep_request(seconds),
+                    reason=f"空闲{seconds}秒",
                     set_pending=False,  # 不是她的【想想】，别污染下一轮「我心想」
                 ):
-                    print(f"[Hane] 空闲{IDLE_TRIGGER_SECONDS}秒，已戳思考层决定是否主动开口")
+                    print(f"[Hane] quiet for {seconds} s (counted from when her voice stopped): asked the reflection whether she speaks first")
         except Exception as e:
-            print(f"[Hane] 空闲监视出错: {e}")
+            print(f"[Hane] the quiet watch failed: {e}")
 
 
 def _cancel_turn_gen(turn_id: str, reason: str) -> bool:
@@ -2889,7 +2960,7 @@ def _prune_unprotected():
         if tid:
             _cancel_turn_gen(tid, "discard")
     if removed_ids:
-        print(f"[Hane] 清除 {len(removed_ids)} 条未保护 turn")
+        print(f"[Hane] cleared {len(removed_ids)} unprotected turn(s)")
     return len(removed_ids)
 
 
@@ -2905,7 +2976,7 @@ def _protect_latest() -> bool:
         tid = t.get("turn_id")
         has_pending = bool(t.get("pending_think"))
     _save_history()
-    print(f"[Hane] 保护 turn {tid}")
+    print(f"[Hane] protected turn {tid}")
     # 这一轮深层喊过【想想】但当时没起思考层（等保护）：现在受保护了，触发慢通道。
     if has_pending:
         _fire_pending_think(tid)
@@ -3038,11 +3109,23 @@ def _inherited_reply_lang() -> tuple:
     return (prev, "inherited") if prev else (None, "unknown")
 
 
+def _describe_provider_error(error):
+    """What the model provider said about a failed turn, first line only (f_openrouter.describe_error), or None."""
+    try:
+        from f_openrouter import describe_error
+        return describe_error(error)
+    except Exception:
+        return None
+
+
 def _ws_run_generation(sid: str, turn_id: str, text: str,
                        model_key: str, deep_model_key: str,
                        entry: dict):
     """后台线程：跑完整的 surface → deep 流水线，流式推送给前端。"""
     cancel = entry["cancel"]
+    # the silence clock waits for this turn's voice to stop (its speech_done), not for its text to end
+    _voice_started(turn_id)
+    entry["_spoke"] = False
 
     def _emit(event, data=None):
         payload = dict(data) if data else {}
@@ -3149,6 +3232,7 @@ def _ws_run_generation(sid: str, turn_id: str, text: str,
                 return
             f_mark_complete(turn_id)
             _emit("end")
+            entry["_spoke"] = True  # proactive audio also waits for speech_done before counting silence
             # 开口轮说完也过一遍书记员：她可能这时才答应他上一轮的要求（引用来源仍是他自己的话；注入轮不跑）。
             _tools_after_turn(turn_id, "", None, entry.get("deep_parsed"), proactive_cue, reply_lang, entry)
             return
@@ -3211,6 +3295,7 @@ def _ws_run_generation(sid: str, turn_id: str, text: str,
 
         f_mark_complete(turn_id)
         _emit("end")
+        entry["_spoke"] = True          # her audio plays on; its speech_done starts the silence clock
         # 说完了才轮到工具：书记员只把她刚答应了的事交办出去（开口轮不跑）。
         _tools_after_turn(turn_id, lang_text or text, surface_reply_saved, entry.get("deep_parsed"),
                           proactive_cue, reply_lang)
@@ -3219,13 +3304,18 @@ def _ws_run_generation(sid: str, turn_id: str, text: str,
         if cancel.is_set():
             _handle_cancel()
         else:
-            _emit("error", {"message": str(e)})
+            # the provider's own first line ("OpenRouter (HTTP 402): Insufficient credits …") when it said one; the
+            # page shows it in the chat log, a Discord / Telegram reply carries it as her system line
+            detail = _describe_provider_error(e)
+            _emit("error", {"message": detail or str(e), "provider": bool(detail)})
             discard_turn(turn_id)
             _emit("end")
     finally:
         with _ws_active_lock:
             _ws_active.pop(turn_id, None)
-        # 一轮生成收尾（含她主动开口）→ 重置静默计时，从此刻开始数"对方没接话"。
+        if not entry.get("_spoke"):
+            _voice_dropped(turn_id)     # cancelled or failed: nothing of it will play
+        # 一轮生成收尾（含她主动开口）→ 重置静默计时；她的声音还在播的话，要等 speech_done 才开始数（_voice_stopped）。
         _mark_activity()
 
 
@@ -3455,7 +3545,7 @@ def ws_connect():
     global _LAST_SID
     _LAST_SID = request.sid
     _mark_activity()
-    print(f"[Hane WS] 客户端已连接: {request.sid}")
+    print(f"[Hane WS] page connected: {request.sid}")
 
 
 @socketio.on("disconnect")
@@ -3464,6 +3554,7 @@ def ws_disconnect():
     sid = request.sid
     if _LAST_SID == sid:
         _LAST_SID = None
+        _voice_stopped(None)            # the page went away: no clip of hers is playing anymore
     # TELEMETRY_SPEC §1.1：之后迟到的 call_receipt（记忆写入、drain）改发给当前连接，不发给已断开的 sid
     telemetry = globals().get("F_TELEMETRY")
     if telemetry is not None:
@@ -3471,7 +3562,7 @@ def ws_disconnect():
             telemetry.forget_sid(sid)
         except Exception:
             pass
-    print(f"[Hane WS] 客户端断开: {sid}")
+    print(f"[Hane WS] page disconnected: {sid}")
     with _ws_active_lock:
         # 只取消本 sid 的生成；entry 由后台线程 finally 段自己从表里 pop
         for entry in _ws_active.values():
@@ -3482,13 +3573,16 @@ def ws_disconnect():
 
 @socketio.on("message")
 def ws_message(data):
-    global _LAST_SID, _CURRENT_CHANNEL
+    global _LAST_SID, _CURRENT_CHANNEL, _CURRENT_VOICE
     sid = request.sid
     _LAST_SID = sid
-    _mark_activity()
     data = data or {}
+    # he talks: whatever she was still saying is over (or cut off), and the silence clock restarts
+    _voice_stopped(None)
     # 舞台（语音/打字）不带 channel → 他在家；messengers 带 "discord"/"telegram" → 她在手机上看文字
     _CURRENT_CHANNEL = str(data.get("channel") or "").strip().lower()
+    # the page with her voice off sends "voice": false — her reply is read, so it keeps the long form
+    _CURRENT_VOICE = data.get("voice") is not False
     text = (data.get("text") or "").strip()
     turn_id = (data.get("turn_id") or "").strip() or None
     if not text:

@@ -2,9 +2,49 @@
 (function () {
   "use strict";
   const { nav, footer, toast, getJSON, postAction, el, setNavDot, fmt, devices } = window.OA;
-  nav("use"); footer();
+  // her desktop pet: this page in pet.py's window with ?pet=1 (<html class="pet">, set in use.html's head)
+  const PET = document.documentElement.classList.contains("pet");
+  if (!PET) { nav("use"); footer(); }
 
   const $ = (id) => document.getElementById(id);
+
+  // ── desktop pet (?pet=1): her stage alone on a transparent, always-on-top window (pet.py, launch.py --pet). The
+  // stage leaves the page layout (hidden by the CSS) before her model loads, so the renderer takes the window's size;
+  // power and mic move into a small bar that shows on hover (a live mic stays visible), with "full page" and "close".
+  // Dragging her moves the window and the wheel sizes it: pet.py does both (pywebview's drag region, its js_api).
+  // Not here: the first-run wizard (meet her on the full page first), the subtitles, the background photo, the camera
+  // and the paper doll; every handler below stays wired to the same elements.
+  if (PET) {
+    const stage = $("stageArea");
+    document.body.prepend(stage);
+    $("stageCanvas").classList.add("pywebview-drag-region");
+    const host = (name, ...args) => {           // pet.py's js_api; false in a plain browser tab
+      const api = window.pywebview && window.pywebview.api;
+      if (!api || typeof api[name] !== "function") return false;
+      Promise.resolve(api[name](...args)).catch(() => {});
+      return true;
+    };
+    const icon = (title, svg, onclick) => {
+      const button = el("button", { type: "button", class: "pet-btn", title, "aria-label": title, onclick });
+      button.innerHTML = svg;
+      return button;
+    };
+    const bar = el("div", { class: "pet-bar" }, $("powerBtn"), $("micBtn"),
+      icon("Open the full page (closes this window)",
+        '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>',
+        () => { if (!host("full_page")) location.href = "/use"; }),
+      icon("Close her window (she keeps running)",
+        '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>',
+        () => { if (!host("close")) window.close(); }));
+    stage.append(bar);
+    let lastZoom = 0;
+    stage.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      if (e.timeStamp - lastZoom < 60) return;     // a trackpad sends dozens of small steps
+      lastZoom = e.timeStamp;
+      host("zoom", e.deltaY < 0 ? 1.08 : 1 / 1.08);
+    }, { passive: false });
+  }
 
   // ── Support MekaHime popup (the same mechanics as OpenSakura's): the first ask comes 2 minutes after the page has
   // loaded, then every 30 minutes while the page is visible. Never in kiosk mode (?kiosk=1, for clean captures) and
@@ -18,7 +58,7 @@
     try { return localStorage.getItem("openamika.donateNever") === "1"; } catch (_) { return false; }
   }
   function showDonate(why) {
-    if (KIOSK || donateNever() || !donateModal || !donateModal.hidden) return;
+    if (PET || KIOSK || donateNever() || !donateModal || !donateModal.hidden) return;
     if (document.querySelector(".oa-wizard-backdrop")) {
       if (why === "first") setTimeout(() => showDonate(why), 30 * 1000);
       return;
@@ -28,7 +68,7 @@
     $("donate-later").focus();
   }
   function hideDonate() { if (donateModal) donateModal.hidden = true; }
-  if (donateModal) {
+  if (donateModal && !PET) {
     $("donate-close").addEventListener("click", hideDonate);
     $("donate-later").addEventListener("click", hideDonate);
     $("donate-never").addEventListener("click", () => {
@@ -88,6 +128,7 @@
     const result = await avatar.init({
       canvas: $("stageCanvas"),
       area: $("stageArea"),
+      fixed: PET,                                 // the pet: she always fills her window, no drag/zoom of the model
       onChunkStart: (meta, emotion) => {
         if (meta && meta.kind === "wizard") { if (meta.onstart) meta.onstart(); return; }   // her wizard lines: no turn bookkeeping
         const kind = (meta && meta.kind) || null;
@@ -546,6 +587,8 @@
       return;
     }
     if (e.repeat || (t && t.closest && t.closest("input, select, textarea, [contenteditable]"))) return;
+    // The pet has no camera or page-layout controls. Keep only its visible mic shortcut.
+    if (PET && key !== "m") return;
     if (key === "w") bigMode ? exitBig() : enterBig("window");
     else if (key === "f" && canFullscreen) bigMode ? exitBig() : enterBig("fullscreen");
     else if (key === "l") setLocked(!locked);
@@ -1015,7 +1058,16 @@ registerProcessor('pcm-pusher', PCMPusher);`;
         break;
       case "ai_error":
         resetEmote();
-        toast(msg.message || "She hit an error.", true);
+        // the provider's own first line ("OpenRouter (HTTP 402): Insufficient credits … — OpenRouter is prepaid: …")
+        // stays in the chat log, where her reply would have been; the toast only points at it
+        chatAdd("sys", "Error", msg.message || "She hit an error.");
+        toast(msg.provider ? "Her model provider refused the reply — see the chat." : (msg.message || "She hit an error."), true);
+        break;
+      case "stop_audio":
+        // Unlock on the Setup page stopped what she was doing: her voice stops here too
+        avatar.flush();
+        resetEmote();
+        $("hudSay").textContent = "";
         break;
       case "tts_error":
         if (msg.surface_last) surfaceClosed();         // the surface's final sentence failed: nothing left to wait for
@@ -1496,9 +1548,9 @@ registerProcessor('pcm-pusher', PCMPusher);`;
       renderJobsCard(d);
       // a job still running = a helper is working for her right now: the doll "thinks" meanwhile
       agentBusy = (d.jobs || []).some((j) => j && !TERMINAL_JOB[j.state] && j.state !== "pending");
-      avatar.setAgentVisible(agents);
+      avatar.setAgentVisible(agents && !PET);      // the pet window shows her alone
       avatar.setAgentBase(agentBusy ? "working" : "idle");
-      bubbleNewLines(entries);
+      if (!PET) bubbleNewLines(entries);
       updateHelpTab();
     } catch (_) { /* the brain or the gateway is busy; try again later */ }
     toolTimer = setTimeout(pollTools, wsWanted ? 2000 : 10000);
@@ -1623,10 +1675,18 @@ registerProcessor('pcm-pusher', PCMPusher);`;
     }
 
     async function loadKeyStatus(line) {
-      try { keyStatus = await getJSON("/api/build_f/openrouter_key"); }
+      try { keyStatus = await getJSON("/api/build_f/openrouter_key?credits=1"); }
       catch (_) { keyStatus = null; }
-      line.textContent = keyStatus === null ? "key status unavailable — is the brain running?"
-        : keyStatus.present ? "A key is saved ✓ " + (keyStatus.hint || "") : "No key saved yet.";
+      showKey(line, keyStatus);
+    }
+    // the green check, or why there is none yet: OpenRouter is prepaid, so a key without credits is not enough
+    function showKey(line, k, note) {
+      if (k === null) { line.textContent = "key status unavailable — is the brain running?"; line.style.color = ""; return; }
+      if (!k.present) { line.textContent = "No key saved yet."; line.style.color = ""; return; }
+      const b = window.OA.keyBalance ? window.OA.keyBalance(k) : { level: "ok", text: "" };
+      line.textContent = (b.level === "ok" ? "✓ Key saved " : "✗ Key saved ") + (k.hint || "") + (b.text ? " · " + b.text : "") +
+        (note && b.level !== "ok" ? " — " + note : "");
+      line.style.color = b.level === "ok" ? "var(--ok)" : "var(--err)";
     }
 
     async function runCheck(rows, verdict, next) {
@@ -1713,28 +1773,44 @@ registerProcessor('pcm-pusher', PCMPusher);`;
         const save = button("Save key", async () => {
           const key = input.value.trim();
           if (!key) { toast("Paste your OpenRouter key first (sk-or-…).", true); return; }
+          save.disabled = true;
+          line.textContent = "saving and asking OpenRouter for the balance…"; line.style.color = "";
           try {
-            await postAction("/api/build_f/openrouter_key", "openrouter-key", { key });
+            const r = await postAction("/api/build_f/openrouter_key", "openrouter-key", { key });
             input.value = "";
-            toast("Key saved — she's online.");
-            loadKeyStatus(line);
-          } catch (error) { toast(String(error.message || error), true); }
+            keyStatus = r;
+            showKey(line, r, r.note);
+            const b = window.OA.keyBalance ? window.OA.keyBalance(r) : { level: "ok" };
+            toast(r.note || "Key saved.", b.level !== "ok");
+          } catch (error) { toast(String(error.message || error), true); loadKeyStatus(line); }
+          finally { save.disabled = false; }
         }, "small primary");
         orPanel.append(el("div", { class: "form-row" }, el("div", { class: "field", style: "flex:2" }, el("label", { text: "OpenRouter API key" }), input), save), line,
-          el("p", { class: "hint", text: "Get a key at openrouter.ai → Keys; that's the only account she needs. In almost all cases this is the better choice: her tested models, for a few dollars a month." }));
+          el("p", { class: "hint", text: "Get a key at openrouter.ai → Keys; that's the only account she needs. OpenRouter is prepaid: add a few dollars of credit first (openrouter.ai/settings/credits) — a chat costs about $0.002. In almost all cases this is the better choice: her tested models, for a few dollars a month." }));
         loadKeyStatus(line);
         // Ollama panel
         const olUrl = el("input", { type: "text", placeholder: "http://127.0.0.1:11434", autocomplete: "off" });
         const olStatus = el("span", { class: "card-hint", text: "" });
         const olSelect = el("select", {});
         const olNote = el("p", { class: "hint", text: "Use a model of 27B or more (70B or more for the full, reliable experience): smaller models may be really bad — she loses her character, forgets and breaks her replies. Install Ollama from ollama.com, run ollama pull gemma3:27b (17 GB), press Detect models, pick it, press Use this model, and she runs entirely on this computer — her memory search already does. A 27B model needs about 19 GB of GPU memory next to her own ~6 GB (~10 GB with her eyes): one 32 GB card holds it; with less, run Ollama on another PC (put its address above) or choose OpenRouter, in almost all cases the better choice." });
+        // under 27B parameters she does not hold her character: say so before the model is used (common.js)
+        const olWarn = el("p", { class: "hint", style: "color:var(--err)", hidden: "" });
+        let olModels = [];
+        const warnSmall = () => {
+          const text = window.OA.smallModelWarning ? window.OA.smallModelWarning(olModels.find((m) => m.name === olSelect.value)) : "";
+          olWarn.textContent = text;
+          olWarn.hidden = !text;
+          return text;
+        };
+        olSelect.addEventListener("change", warnSmall);
         const useBtn = button("Use this model", async () => {
           const model = olSelect.value;
           if (!model) { toast("Detect models first.", true); return; }
+          const warning = warnSmall();
           try {
             await postAction("/api/build_f/ollama/use", "ollama-use", { model });
             olStatus.textContent = "She thinks locally on " + model + " now.";
-            toast("Fully local: " + model + ".");
+            toast(warning ? "Fully local: " + model + ". " + warning : "Fully local: " + model + ".", !!warning);
           } catch (error) { toast(String(error.message || error), true); }
         }, "small primary");
         useBtn.disabled = true;
@@ -1743,10 +1819,12 @@ registerProcessor('pcm-pusher', PCMPusher);`;
             const info = await getJSON("/api/build_f/ollama");
             if (!olUrl.value.trim()) olUrl.value = info.base_url || "http://127.0.0.1:11434";
             const models = info.models || [];
+            olModels = models;
             olSelect.replaceChildren(...(models.length ? models.map((m) => el("option", { value: m.name, text: m.name + (m.parameter_size ? " · " + m.parameter_size : "") + (m.size_gb ? " · " + m.size_gb + " GB" : "") }))
                                                        : [el("option", { value: "", text: "— detect models first —" })]));
             const inUse = info.in_use || {};
             if (inUse.deep) olSelect.value = inUse.deep;
+            warnSmall();
             useBtn.disabled = !models.length;
             olStatus.textContent = info.reachable ? "Ollama " + (info.live_version || "") + " is running" + (models.length ? " · " + models.length + " model(s)" : " · no models detected yet")
               : "not answering at " + info.base_url + " — start Ollama, then Detect";
@@ -1762,7 +1840,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
           finally { detect.disabled = false; }
         }, "small");
         olPanel.append(el("div", { class: "form-row" }, el("div", { class: "field", style: "flex:2" }, el("label", { text: "Ollama server" }), olUrl), detect), olStatus,
-          el("div", { class: "form-row" }, el("div", { class: "field", style: "flex:2" }, el("label", { text: "Model for all four roles" }), olSelect), useBtn), olNote);
+          el("div", { class: "form-row" }, el("div", { class: "field", style: "flex:2" }, el("label", { text: "Model for all four roles" }), olSelect), useBtn), olWarn, olNote);
         body.append(choice, orPanel, olPanel);
         // start on whichever she already uses
         getJSON("/api/build_f/models").then((m) => {
@@ -1775,7 +1853,8 @@ registerProcessor('pcm-pusher', PCMPusher);`;
         const rows = el("div", { class: "check" });
         const verdict = el("p", { class: "verdict" });
         const next = button("Start talking", finish, "primary");
-        body.append(rows, verdict);
+        body.append(rows, verdict, el("p", { class: "hint", text: "To start over one day: Setup → Danger zone → Wipe memory. "
+          + "She forgets every conversation; a backup is kept." }));
         actions.append(button("← Back", () => go(3), "small"), button("Re-check", () => runCheck(rows, verdict, next), "small skip"),
           el("a", { class: "btn small", href: "/setup", text: "Open Setup" }), next);
         runCheck(rows, verdict, next);
@@ -1785,5 +1864,5 @@ registerProcessor('pcm-pusher', PCMPusher);`;
     render();
     speakCurrent();   // before any click this parks the line on the portrait ("click to hear her")
   }
-  firstRun();
+  if (!PET) firstRun();                          // her first meeting needs the full page
 })();
