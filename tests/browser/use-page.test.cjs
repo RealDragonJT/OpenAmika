@@ -12,7 +12,7 @@ after(async () => { await browser?.close(); });
 
 // Serve the real UI through routing: no server, models, account, or running stack.
 // Media uses Chromium's synthetic devices. API responses and dialog sockets are fixtures.
-async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFactor = 1, readyAvatar = false) {
+async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFactor = 1, readyAvatar = false, options = {}) {
   const context = await browser.newContext({ viewport, deviceScaleFactor, permissions: ['camera', 'microphone'] });
   t.after(() => context.close());
   const page = await context.newPage();
@@ -29,9 +29,12 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
       if (readyAvatar && p === '/ui/live2d-engine.js') {
         // Simulate a loaded model and observe the busy-display API without licensed model assets.
         const body = await fs.readFile(f, 'utf8') + `
-          OpenAmikaAvatar.init = async () => ({ ok: true });
+          OpenAmikaAvatar.init = async options => { fixture.avatarOptions = options; return { ok: true }; };
           fixture.busyHistory = [];
           OpenAmikaAvatar.setBusy = on => { fixture.busy = on; fixture.busyHistory.push(on); };
+          const flush = OpenAmikaAvatar.flush;
+          fixture.flushCount = 0;
+          OpenAmikaAvatar.flush = () => { fixture.flushCount++; flush(); };
         `;
         return route.fulfill({ body, contentType });
       }
@@ -45,8 +48,13 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
     };
     return route.fulfill({ json: fixtures[p] || {} });
   });
-  await page.addInitScript(() => {
+  await page.addInitScript(({ host }) => {
     window.fixture = { sockets: [], streams: [], requests: [], pending: [], holdMedia: false, denyMedia: false };
+    if (host) {
+      fixture.hostCalls = [];
+      window.pywebview = { api: Object.fromEntries(['zoom', 'full_page', 'close'].map(name =>
+        [name, (...args) => { fixture.hostCalls.push([name, ...args]); return Promise.resolve(); }])) };
+    }
     window.WebSocket = class {
       constructor(url) {
         this.url = url; this.readyState = 0; this.bufferedAmount = 0; this.sent = [];
@@ -65,8 +73,8 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
       fixture.streams.push(stream);
       return stream;
     };
-  });
-  await page.goto('http://localhost:53999/use?kiosk=1');
+  }, { host: !!options.host });
+  await page.goto('http://localhost:53999/use?' + (options.pet ? 'pet=1' : 'kiosk=1'));
   await page.waitForFunction(ready => window.OA && window.OpenAmikaAvatar &&
     (ready ? Array.isArray(fixture.busyHistory) && fixture.busyHistory.length : !document.querySelector('#stageEmpty').hidden), readyAvatar);
   return page;
@@ -357,3 +365,103 @@ for (const [width, height] of [[320, 740], [390, 844], [844, 390], [1024, 768], 
     await p.keyboard.press('Escape');
   });
 }
+
+test('pet stage fills its window transparently and keeps only pet controls', async t => {
+  const p = await open(t, { width: 320, height: 560 }, 1, true, { pet: true, host: true });
+  assert.equal(await p.evaluate(() => fixture.avatarOptions.fixed), true);
+  assert.equal(await p.locator('.oa-nav').count(), 0);
+  assert.equal(await p.locator('.u-main').isHidden(), true);
+  assert.equal(await p.locator('#stageArea').evaluate(e => e.parentElement === document.body), true);
+  assert.equal(await p.locator('#stageCanvas').evaluate(e => e.classList.contains('pywebview-drag-region')), true);
+  for (const [width, height] of [[320, 560], [160, 240], [480, 800]]) {
+    await p.setViewportSize({ width, height });
+    const box = await p.locator('#stageArea').boundingBox();
+    assert.deepEqual(box, { x: 0, y: 0, width, height });
+    for (const selector of ['html', 'body', '#stageArea']) {
+      assert.equal(await p.locator(selector).evaluate(e => getComputedStyle(e).backgroundColor), 'rgba(0, 0, 0, 0)');
+    }
+    for (const selector of ['.u-vignette', '.u-top', '.u-dock', '.u-stage-cam', '.stage-hud']) {
+      assert.equal(await p.locator(selector).isHidden(), true, selector + ' hidden in pet');
+    }
+    await p.locator('#powerBtn').focus();
+    const bar = await p.locator('.pet-bar').boundingBox();
+    assert.ok(bar.x >= 0 && bar.x + bar.width <= width, 'all controls fit at ' + width);
+    for (const button of await p.locator('.pet-bar > button').all()) {
+      await p.waitForFunction(e => getComputedStyle(e).opacity === '1', await button.elementHandle());
+    }
+  }
+  // Page-only shortcuts cannot silently turn on the pet's hidden camera or change the browser's model lock.
+  const lock = await p.evaluate(() => localStorage.getItem('openamika-stageLocked'));
+  for (const key of ['c', 'w', 'f', 'l']) await p.keyboard.press(key);
+  assert.equal(await p.evaluate(() => fixture.requests.length), 0);
+  assert.equal(await p.locator('#stageArea').evaluate(e => e.classList.contains('u-big')), false);
+  assert.equal(await p.evaluate(() => localStorage.getItem('openamika-stageLocked')), lock);
+  await p.clock.install();
+  await p.clock.fastForward(31 * 60 * 1000);
+  assert.equal(await p.locator('#donate-modal').isHidden(), true, 'no donation overlay in the pet');
+});
+
+test('pet window controls call the native bridge and mic capture remains visible until stopped', async t => {
+  const p = await open(t, { width: 320, height: 560 }, 1, true, { pet: true, host: true });
+  await p.locator('#powerBtn').click();
+  await p.waitForFunction(() => fixture.sockets[0]?.readyState === 1);
+  await p.locator('#stageCanvas').hover({ position: { x: 100, y: 100 } });
+  await p.mouse.wheel(0, -100);
+  await p.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'zoom' && c[1] > 1));
+  await p.getByRole('button', { name: 'Open the full page (closes this window)', exact: true }).click();
+  await p.getByRole('button', { name: 'Close her window (she keeps running)', exact: true }).click();
+  assert.equal(await p.evaluate(() => fixture.hostCalls.filter(c => c[0] === 'full_page').length), 1);
+  assert.equal(await p.evaluate(() => fixture.hostCalls.filter(c => c[0] === 'close').length), 1);
+  await p.keyboard.press('m');
+  await pressed(p, 'micBtn', true);
+  // Remove hover/focus visibility to verify that an active mic is still shown.
+  await p.evaluate(() => document.activeElement.blur());
+  await p.mouse.move(-10, -10);
+  await p.waitForFunction(() => getComputedStyle(micBtn).opacity === '1');
+  await p.keyboard.press('m');
+  await pressed(p, 'micBtn', false);
+  await noTracks(p);
+});
+
+for (const pet of [false, true]) {
+  test(`playback acknowledgements and forced-stop recovery in ${pet ? 'pet' : 'browser'}`, async t => {
+    const p = await open(t, undefined, 1, true, { pet });
+    await p.locator('#powerBtn').click();
+    await p.waitForFunction(() => fixture.sockets[0]?.readyState === 1);
+    await p.evaluate(() => {
+      const meta = { ack: true, turn_id: 'merged-turn', idx: 0, kind: 'deep', text: 'Hello' };
+      fixture.avatarOptions.onChunkStart(meta, null);
+      fixture.avatarOptions.onChunkEnd(meta);
+    });
+    const sent = await p.evaluate(() => fixture.sockets[0].sent.filter(x => typeof x === 'string').map(JSON.parse));
+    for (const type of ['tts_playing', 'tts_finished']) assert.equal(sent.filter(x => x.type === type && x.turn_id === 'merged-turn').length, 1);
+    await p.evaluate(() => fixture.sockets[0].onmessage({ data: JSON.stringify({ type: 'ai_surface_done', mode: 'think', surface_tts_done: true }) }));
+    const before = await p.evaluate(() => fixture.flushCount);
+    await p.evaluate(() => fixture.sockets[0].onmessage({ data: JSON.stringify({ type: 'stop_audio' }) }));
+    assert.equal(await p.evaluate(() => fixture.flushCount), before + 1);
+    assert.equal(await p.evaluate(() => fixture.busy), false);
+    assert.equal(await p.locator('#hudSay').textContent(), '');
+    await p.evaluate(() => fixture.sockets[0].onmessage({ data: JSON.stringify({ type: 'ai_error', provider: 'OpenRouter', message: 'Provider refused this reply' }) }));
+    assert.ok((await p.locator('#chatLog').textContent()).includes('Provider refused this reply'));
+    await p.locator('#powerBtn').click();
+    await pressed(p, 'powerBtn', false);
+  });
+}
+
+test('shared controls retain saved devices and forward the upstream model-unlock header', async t => {
+  const p = await open(t);
+  let received;
+  await p.route('**/api/build_f/preset', async route => {
+    received = { headers: route.request().headers(), body: route.request().postDataJSON() };
+    await route.fulfill({ json: { ok: true } });
+  });
+  await p.evaluate(async () => {
+    OA.devices.set('mic', 'chosen-microphone');
+    await OA.postAction('/api/build_f/preset', 'apply-preset', { force: true }, { 'X-Build-F-Force': '1' });
+  });
+  assert.equal(received.headers['x-build-f-force'], '1');
+  assert.equal(received.headers['x-build-f-action'], 'apply-preset');
+  assert.deepEqual(received.body, { force: true });
+  assert.equal(await p.evaluate(() => OA.devices.get('mic')), 'chosen-microphone');
+  assert.equal(await p.evaluate(() => OA.keyBalance({ credits: { ok: true, empty: true } }).level), 'err');
+});

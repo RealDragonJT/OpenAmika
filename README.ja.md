@@ -9,14 +9,14 @@
 
 Amikaは、声とテキストでリアルタイムにおしゃべりしてくれるLive2Dのアニメ少女です。あなたのことを覚えていて、あなたの街で一緒に暮らしています。動くのはあなた自身のPCの上で、OpenRouterを使うことも、Ollamaで完全ローカルにすることもできます。ホスト版も[mekahime.com/amika](https://www.mekahime.com/amika)で動いています。
 
-[简体中文](README.zh-CN.md) | **日本語** | [English](README.md)
+[简体中文](README.zh-CN.md) | **日本語** | [English](README.md) | [Tiếng Việt](README.vi.md)
 
 [![Made with Love](https://img.shields.io/badge/Made%20with-Love-ff69b4)](https://www.mekahime.com/openamika)
 [![GitHub](https://img.shields.io/badge/GitHub-zeekk0%2FOpenAmika-181717?logo=github)](https://github.com/zeekk0/OpenAmika)
 [![Release](https://img.shields.io/github/v/release/zeekk0/OpenAmika?logo=github&color=d8b4e2)](https://github.com/zeekk0/OpenAmika/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-43b581)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20(Linux%20untested)-0078D6?logo=windows&logoColor=white)](#必要なもの)
-[![Python 3.11](https://img.shields.io/badge/python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/release/python-3119/)
+[![Python 3.11 | 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/release/python-3119/)
 
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-MekaHime%2FMekaHime__Amika-ffcc4d)](https://huggingface.co/MekaHime/MekaHime_Amika)
 [![Discord](https://img.shields.io/badge/Discord-MekaHime-5865F2?logo=discord&logoColor=white)](https://discord.gg/mekahime)
@@ -27,13 +27,142 @@ Amikaは、声とテキストでリアルタイムにおしゃべりしてくれ
 
 </div>
 
+## インストール：7つのステップ
+
+**始める前に：** Windows 10 または 11、NVIDIAのグラフィックカード（RTX 20シリーズ以降、ビデオメモリ8 GB）、空きディスク約40 GBがありますか？
+
+- **はい** → STEP 1 へ。
+- **いいえ** → ブラウザーで彼女と話せます：[mekahime.com/amika](https://www.mekahime.com/amika)。
+
+### STEP 1 — Python 3.11 と Git をインストール
+
+約5分。
+
+1. [python-3.11.9-amd64.exe](https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe) をクリックして開きます。最初の画面の下にある **Add python.exe to PATH** にチェックを入れ、**Install Now** をクリック。
+2. [Git-2.56.0.4-64-bit.exe](https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.4/Git-2.56.0.4-64-bit.exe) をクリックして開きます。**Install** が出るまで **Next** をクリックし、**Install**、最後に **Finish**。
+
+表示：「Setup was successful」（Python）と「Completing the Git Setup Wizard」（Git）。
+
+### STEP 2 — 彼女を置くフォルダーで PowerShell を開く
+
+1. **Windowsキー**を押し、`powershell` と入力して **Enter**。普通のウィンドウで開きます（「管理者として実行」ではありません）。
+2. 下の行をコピーし、青いウィンドウをクリックして**右クリック**（これで貼り付けられます）、**Enter**。
+
+```powershell
+cd C:\
+```
+
+表示：`PS C:\>` と点滅するカーソル。
+
+どのドライブでも大丈夫です：`cd D:\` なら D: に入ります。パスは短いほど安全です。OneDriveの中には置かないでください。
+
+### STEP 3 — OpenAmika をダウンロード
+
+1行ずつ貼り付けて **Enter**、`PS ...>` が戻るまで待ちます。約1分。
+
+```powershell
+git clone https://github.com/zeekk0/OpenAmika.git
+```
+
+```powershell
+cd OpenAmika
+```
+
+表示：`PS C:\OpenAmika>`。
+
+- `'git' is not recognized` と出たら → このウィンドウを閉じて STEP 2 からやり直し（新しいウィンドウならGitが見つかります）、このステップへ。
+- `destination path 'OpenAmika' already exists` と出たら → もうダウンロード済みです。`cd OpenAmika` を貼り付けて先へ。
+
+### STEP 4 — セットアップを実行
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup_windows.ps1
+```
+
+15〜60分、ダウンロードは約11 GB。ウィンドウは開いたままにしてください。
+
+最初に Hugging Face のトークンを聞かれます：**Enter** で飛ばすか、[huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) で作った無料の *Read* トークンを貼り付けます（ダウンロードがずっと速くなります）。
+
+最後の表示：`OpenAmika setup summary`、`OK` で始まる行、そして `Done. Next:`。
+
+- `The argument 'scripts\setup_windows.ps1' to the -File parameter does not exist` → このウィンドウが彼女のフォルダーにいません。`cd C:\OpenAmika`（またはセットアップが表示した `cd` の行）を貼り付けて **Enter**、もう一度実行。
+- `Python 3.11 was not found` → **Add python.exe to PATH** にチェックを入れて STEP 1 をやり直し、新しいウィンドウ（STEP 2）で `cd C:\OpenAmika`、そしてこの行をもう一度。
+- ダウンロードがとても遅い（約50 KB/s）→ **Ctrl+C** を押してもう一度実行し、聞かれたら Hugging Face のトークンを貼り付けます。止まったところから続きます。
+- `!!` で始まる行が出たら → その行の指示どおりにして、もう一度実行。終わった部分は飛ばされます。
+
+### STEP 5 — 彼女の声とモデル
+
+```powershell
+envs\brain\Scripts\python.exe scripts\setup_tts.py
+```
+
+10〜30分、ダウンロードは約5.5 GB。ライセンスが表示されたあと聞かれるので、`yes` と入力して **Enter**。
+
+表示：`OK voice MekaHime_Amika` と `OK Live2D model Amika`、そして `Done. Next:`。
+
+- `not downloaded: her license was not accepted` → もう一度実行して `yes` と入力。
+- `'envs\brain\Scripts\python.exe' is not recognized` → このウィンドウが彼女のフォルダーにいない（`cd C:\OpenAmika`）か、STEP 4 が終わっていません。
+
+### STEP 6 — 彼女を起動
+
+```powershell
+.\Start_OpenAmika.bat
+```
+
+次からは `C:\OpenAmika` の `Start_OpenAmika.bat` をダブルクリックするだけです。
+
+1〜3分（初回がいちばん遅いです）。
+
+表示：**OpenAmika** という名前のウィンドウに緑の行が並びます。ブラウザーで彼女のページ（http://localhost:53000）が開き、最初のウィンドウがあなたの名前と街を聞きます。
+
+- 彼女のウィンドウに `moved to … in settings.json (chat_port)` → Windowsがポート53000を予約していたので、次の空いているポートに移りました。ウィンドウ上部のアドレスを開いてください。
+- エラーで止まったら → ウィンドウは開いたままで、ログ（`logs\launcher.log`）を示します。そのファイルを [Discord](https://discord.gg/mekahime) へ。
+
+### STEP 7 — 最初のウィンドウに OpenRouter のキーを貼り付ける
+
+1. [openrouter.ai](https://openrouter.ai) でサインインし、**Credits** を開いて数ドル入金します。OpenRouterは前払い制です：キーだけでは足りません。
+2. **Keys** → **Create Key**。キー（`sk-or-v1-` で始まります）をコピー。
+3. 彼女の最初のウィンドウの「脳」のところで **OpenRouter** をクリックし、キーを貼り付けて **Save key**。
+
+表示：緑の `✓ Key saved … · $5.00 of credit left`。**Next** をクリックし、ページを一度クリック（ブラウザーが彼女の声を許可します）、電源ボタンを押して話しかけてください。
+
+- `no credits` と出たら → openrouter.ai でクレジットを追加し、もう一度 **Save key**。
+- 返事が失敗したら → チャットにOpenRouter自身の理由が表示されます。モデルが無くなっていたら：Setup → Brain → **Switch back to the OpenRouter preset**。
+
+> **`git clone` ではなくZIPをダウンロードした？** 解凍し、内側のフォルダー（`Start_OpenAmika.bat` が入っている方）を開きます。何もないところを右クリック → **ターミナルで開く**。そのあと STEP 4 から STEP 7 へ。
+> （Windows 10：フォルダーのアドレスバーをクリックし、`powershell` と入力して **Enter**。）
+
+*STEP 1〜6 は、**metro01** さんがMekaHime Discordのヘルプデスクに書いてくれた手順をもとにしています。ありがとう、metro01さん！*
+
+## アップデート（彼女の記憶はそのまま）
+
+彼女の記憶は `memory_f` と `brain\memories` にあります。何かする前にバックアップしてください。
+
+**git clone した場合**
+
+1. **STEP 1 — 彼女を止める。** `Stop_OpenAmika.bat` をダブルクリック。
+2. **STEP 2 — 彼女のフォルダーの `Update_OpenAmika.bat` をダブルクリック。** 彼女の記憶と設定を `backups\update-<日付>.zip` に保存し、アップデートをダウンロードして、変わった部分をインストールします。ライセンスを聞かれたら `yes`。
+
+表示：`Updated. Start her: double-click Start_OpenAmika.bat`。
+
+- `She is running` → 先に STEP 1。
+- 「with your own changes」としてファイルが並んだら → あなたの版が残っています。彼女の記憶は無事です。
+
+**ZIPをダウンロードした場合**
+
+1. **STEP 1 — 彼女を止める。** `Stop_OpenAmika.bat` をダブルクリック。
+2. **STEP 2 — 新しいZIPをダウンロードして、古いフォルダーの隣に解凍。**
+3. **STEP 3 — 古いフォルダーから新しいフォルダーへ次のものをコピー**（あるものだけ）：`memory_f`、`brain\memories`、`settings.json`、`brain\.env`、`config\seed.json`、`config\ollama.json`、`config\voice_map.json`、`config\tools.json`、`config\messengers.json`。
+4. **STEP 4 — 新しいフォルダーでセットアップを実行**：インストールの STEP 4 と STEP 5 を新しいフォルダーで。2回目は速くなります。
+5. **STEP 5 — 新しいフォルダーから彼女を起動。** 名前と街をもう一度聞かれることがありますが、記憶はすべて残っています。彼女があなたを覚えているのを確かめてから、古いフォルダーを消してください。
+
 > 💖 Amikaのおかげで毎日が少しでも楽しくなったら、[GitHub](https://github.com/zeekk0/OpenAmika)で⭐をつけてもらえるとうれしいです。もっとたくさんの人が彼女に出会えます！ · プロジェクトへのご支援: https://www.mekahime.com/donate
 
 ## 必要なもの
 
 - Windows 10または11と、NVIDIAのグラフィックカード（RTX 20シリーズ以降、ビデオメモリ8 GB以上。カメラで「見る」機能には16 GB）、そして新しいドライバー
-- [Python 3.11](https://www.python.org/downloads/release/python-3119/)（インストール時に **Add python.exe to PATH** にチェック）と[Git](https://git-scm.com/download/win)
-- 約45 GBの空きディスク。セットアップでは約15〜20 GBをダウンロードし、30〜60分ほどかかります
+- [Python 3.11](https://www.python.org/downloads/release/python-3119/)（インストール時に **Add python.exe to PATH** にチェック。3.12でも動きます。3.13以降は、彼女の声のサーバーが必要とする numpy 1.26.4 にホイールがないため動きません）と[Git](https://git-scm.com/download/win)
+- 約40 GBの空きディスク（セットアップ後の使用量は約37 GB、カメラの目なしなら約28 GB。終わったあと `pip cache purge` で約6 GB戻ります）。セットアップでは約16 GBをダウンロードし、30〜60分ほどかかります
 - 言語モデル用の[OpenRouter](https://openrouter.ai)のキー（おすすめ。費用は月に数ドルほどです）。または[Ollama](https://ollama.com)と、27B以上のモデルを動かせるグラフィックカード（[どの言語モデルを使う？](#どの言語モデルを使う)を参照）
 
 ## どの言語モデルを使う？
@@ -62,9 +191,11 @@ envs\brain\Scripts\python.exe scripts\setup_tts.py                   # 声、Liv
 
 どちらのセットアップコマンドも、最後にまとめを表示します。1行に1項目で、完了なら`OK`、問題があれば`!!`と直し方、`--`はお知らせだけです（たとえばOpenRouterのキーがまだないとき。最初に開いたときに入力できます）。同じコマンドをもう一度実行すれば、終わった部分は飛ばして続きから再開します。`setup_tts.py`のまとめに`OK voice MekaHime_Amika`と`OK Live2D model Amika`が出ていれば、彼女の声と体はそろっています。`OK paper doll Host`は、彼女のヘルパーの代わりに舞台に立つ紙人形です（[彼女のヘルパー](#彼女のヘルパーhermesとnanomuse)）。
 
+あとで彼女の記憶をリセットしたいときは、Setupページ →「Danger zone」→ **Wipe memory** を使います。すべての会話と事実を忘れ、バックアップは`memory_f\backups\`に残ります。彼女がまだ話していれば数秒待ち、それでも終わらないときは **Force wipe**（彼女はしていることをやめます）を表示します。スクリプトからは`envs\brain\Scripts\python.exe launch.py --wipe-memory`（先に止めるなら`--force`。彼女が起動していなくても使えます）。
+
 ## 話しかける
 
-OpenAmikaフォルダーの`Start_OpenAmika.bat`をダブルクリックします（PowerShellでは`.\Start_OpenAmika.bat`）。コンソールが1つ開いて彼女のすべてが起動し、準備ができるとブラウザーで **http://localhost:53000** が開きます（約1分。初回はもう数分かかります）。最初に開いたとき、彼女が自己紹介をして、あなたの名前と住んでいる街、そして`brain\.env`にまだキーがなければOpenRouterのキーをたずねます。あとは電源ボタンを押して話しかけるか、文字で入力してください。ブラウザーが彼女の声を再生できるよう、ページを一度クリックしてください。
+OpenAmikaフォルダーの`Start_OpenAmika.bat`をダブルクリックします（PowerShellでは`.\Start_OpenAmika.bat`）。コンソールが1つ開いて彼女のすべてが起動し、準備ができるとブラウザーで **http://localhost:53000** が開きます（約1分。初回はもう数分かかります）。最初に開いたとき、彼女が自己紹介をして、あなたの名前と住んでいる街、そして`brain\.env`にまだキーがなければOpenRouterのキーをたずねます。あとは電源ボタンを押して話しかけるか、文字で入力してください。ブラウザーが彼女の声を再生できるよう、ページを一度クリックしてください。あなたが黙っていると、彼女の声が止まった時点から数えて、彼女のほうから話しかけることがあります。頻度はSetup →「You & Amika」→「When you go quiet」で Normal / Rare / Off を選べます。
 
 各ページ右上のランプは彼女の状態です。緑ならすべて正常で、クリックすると問題のある項目が見られます。止めるときは`Stop_OpenAmika.bat`をダブルクリックします（またはコンソールでCtrl+C）。何も起動せずに全体をチェックするには`envs\brain\Scripts\python.exe launch.py --check`を実行します。最後に`result: ready`と出るか、直すべき項目が表示されます。
 
@@ -88,9 +219,12 @@ OpenAmikaフォルダーの`Start_OpenAmika.bat`をダブルクリックしま�
 | 声が途切れる、またはとても遅い | グラフィックカードを使うほかのアプリを閉じるか、`settings.json`で`"vision": {"enabled": false}`にして目の機能をオフにします。 |
 | Ollamaで彼女らしくない、話したことを忘れる、返事が崩れる | モデルが小さすぎます。27B以上（フルで安定した体験には70B以上）のモデルを使うか、OpenRouterに戻してください：Setup → Brain → OpenRouter → 「Switch back to the OpenRouter preset」。 |
 | Ollamaだと返事がとても遅い | `ollama ps`の表示が`100% GPU`ではなくCPU/GPUの割合になっている場合は、モデルが彼女と一緒にビデオメモリに収まっていません。`100% GPU`なら、話をさえぎった直後や、記憶の保存中・会話の振り返り中に返事が遅れるのは、ローカルのモデルでは普通のことです。[どの言語モデルを使う？](#どの言語モデルを使う)を参照してください。 |
+| 記憶の消去やリセットで`Amika is busy` | 彼女が話し終えるまで数秒待ちます。それでも終わらないときは **Force wipe (she stops what she is doing)** を押します。バックアップはどちらの場合も残ります。 |
+| Setupページで`Model selection is busy` | メッセージの横の **Unlock** を押します。彼女はしていることをやめ、切り替えが通ります。 |
+| コンソールのbrainの行（またはSetupページの`brain start`）が赤い | その行に理由が出ます：ポートが使われている、環境が壊れている、モデルが入りきらない、キーがない。 |
 | Toolsページのヘルパーのカードが赤い、または彼女がHermesやnanoMuseにつながらないと言う | `envs\brain\Scripts\python.exe launch.py --check`を実行し、`agent`と`hermes key`の行を見てください。各メッセージの意味と直し方は[docs/TOOLS.md](docs/TOOLS.md#when-it-does-not-work)にあります。 |
 
-各パーツのログは`logs\`にあります。それでも解決しないときは、[Discord](https://discord.gg/mekahime)で質問するか、[issue](https://github.com/zeekk0/OpenAmika/issues)を作成してください。AIコーディングエージェントを使う場合は、[README_IF_YOU_ARE_AI_AGENT.md](README_IF_YOU_ARE_AI_AGENT.md)を読ませてください。
+各パーツのログは`logs\`にあります。それでも解決しないときは、`envs\brain\Scripts\python.exe launch.py --diagnose`を実行してください。`logs\`にzipが1つでき（起動時のチェック、各ログの末尾、キーを除いた設定、バージョン、空きディスクとGPUメモリ）、それを添えて、[Discord](https://discord.gg/mekahime)で質問するか、[issue](https://github.com/zeekk0/OpenAmika/issues)を作成してください。AIコーディングエージェントを使う場合は、[README_IF_YOU_ARE_AI_AGENT.md](README_IF_YOU_ARE_AI_AGENT.md)を読ませてください。
 
 ## オプション機能
 
