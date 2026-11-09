@@ -708,6 +708,7 @@
     stopMic(true);
     if (ws) { try { ws.close(); } catch (_) {} ws = null; }
     avatar.flush();
+    resetEmote();  // the retired socket's onclose is ignored, so explicit disconnect owns this cleanup
     setPowerUI("Offline", "press power to connect");
   }
 

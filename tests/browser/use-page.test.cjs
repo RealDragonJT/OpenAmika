@@ -12,7 +12,7 @@ after(async () => { await browser?.close(); });
 
 // Serve the real UI through routing: no server, models, account, or running stack.
 // Media uses Chromium's synthetic devices. API responses and dialog sockets are fixtures.
-async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFactor = 1) {
+async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFactor = 1, readyAvatar = false) {
   const context = await browser.newContext({ viewport, deviceScaleFactor, permissions: ['camera', 'microphone'] });
   t.after(() => context.close());
   const page = await context.newPage();
@@ -26,6 +26,15 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
     if (p === '/use' || p.startsWith('/ui/')) {
       const f = path.join(root, p === '/use' ? 'ui/use.html' : p.slice(1));
       const contentType = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.webp': 'image/webp' }[path.extname(f)];
+      if (readyAvatar && p === '/ui/live2d-engine.js') {
+        // Simulate a loaded model and observe the busy-display API without licensed model assets.
+        const body = await fs.readFile(f, 'utf8') + `
+          OpenAmikaAvatar.init = async () => ({ ok: true });
+          fixture.busyHistory = [];
+          OpenAmikaAvatar.setBusy = on => { fixture.busy = on; fixture.busyHistory.push(on); };
+        `;
+        return route.fulfill({ body, contentType });
+      }
       return route.fulfill({ body: await fs.readFile(f), contentType });
     }
     const fixtures = {
@@ -58,7 +67,8 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
     };
   });
   await page.goto('http://localhost:53999/use?kiosk=1');
-  await page.waitForFunction(() => window.OA && window.OpenAmikaAvatar && !document.querySelector('#stageEmpty').hidden);
+  await page.waitForFunction(ready => window.OA && window.OpenAmikaAvatar &&
+    (ready ? Array.isArray(fixture.busyHistory) && fixture.busyHistory.length : !document.querySelector('#stageEmpty').hidden), readyAvatar);
   return page;
 }
 const pressed = (page, id, value) => page.waitForFunction(([id, value]) => document.getElementById(id).getAttribute('aria-pressed') === String(value), [id, value]);
@@ -106,6 +116,32 @@ test('rapid reconnect ignores stale socket callbacks and sends text once', async
   assert.equal(await p.locator('#sayBtn').isDisabled(), true);
   await p.waitForFunction(() => fixture.sockets[2]?.readyState === 1);
   assert.equal(await p.locator('#sayInput').inputValue(), 'Retain on reconnect');
+});
+
+test('disconnect clears thinking immediately and cancels its timer without affecting a new socket', async t => {
+  const p = await open(t, undefined, 1, true);
+  await p.clock.install();
+  await p.locator('#powerBtn').click();
+  await p.waitForFunction(() => fixture.sockets[0]?.readyState === 1);
+  const think = socket => p.evaluate(index => fixture.sockets[index].onmessage({
+    data: JSON.stringify({ type: 'ai_surface_done', mode: 'think', surface_tts_done: true }),
+  }), socket);
+  await think(0);
+  assert.equal(await p.evaluate(() => fixture.busy), true, 'waiting for the deep reply shows thinking');
+  await p.locator('#powerBtn').click();
+  assert.equal(await p.evaluate(() => fixture.busy), false, 'Power off clears thinking immediately');
+  assert.equal(await p.locator('#powerState').textContent(), 'Offline');
+  const historyLength = await p.evaluate(() => fixture.busyHistory.length);
+  await p.clock.fastForward(120001);
+  assert.equal(await p.evaluate(() => fixture.busyHistory.length), historyLength, 'the canceled safety timer never fires');
+  assert.equal(await p.evaluate(() => fixture.sockets.length), 1, 'explicit disconnect does not reconnect');
+  await p.locator('#powerBtn').click();
+  await p.waitForFunction(() => fixture.sockets[1]?.readyState === 1);
+  await think(1);
+  await p.evaluate(() => fixture.sockets[0].onclose({}));
+  assert.equal(await p.evaluate(() => fixture.busy), true, 'old close cannot clear thinking on the new connection');
+  await p.evaluate(() => fixture.sockets[1].onmessage({ data: JSON.stringify({ type: 'ai_deep_done' }) }));
+  assert.equal(await p.evaluate(() => fixture.busy), false, 'the new reply clears its own thinking state');
 });
 
 test('camera off cancels a pending permission request and stops its late stream', async t => {

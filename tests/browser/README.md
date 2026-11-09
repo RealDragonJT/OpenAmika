@@ -12,6 +12,8 @@ The checks render the actual UI in Chromium at desktop, tablet, phone, and lands
 sizes. They exercise keyboard dismissal and focus, fullscreen and its fallback,
 saved lock and camera-preview state, reconnects, retained text, media cancellation,
 permission retry, and a missing saved device. Browser script errors fail the checks.
+The thinking-state disconnect check uses a ready-avatar fixture to verify immediate
+busy-display cleanup, timer cancellation, and protection from old socket callbacks.
 Navigation checks cover both mode labels, resizing, and centered wrapping. A PNG
 pixel check compares the status dot and ring at 100%, 125%, 150%, and 200% display
 scales, since layout rectangles alone do not detect paint-time rounding.
