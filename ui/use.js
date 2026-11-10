@@ -1,7 +1,7 @@
 /* OpenAmika — Use page: dialog socket, mic, avatar feed, telemetry. */
 (function () {
   "use strict";
-  const { nav, footer, toast, getJSON, postAction, el, setNavDot, fmt } = window.OA;
+  const { nav, footer, toast, getJSON, postAction, el, setNavDot, fmt, devices } = window.OA;
   // her desktop pet: this page in pet.py's window with ?pet=1 (<html class="pet">, set in use.html's head)
   const PET = document.documentElement.classList.contains("pet");
   if (!PET) { nav("use"); footer(); }
@@ -58,7 +58,7 @@
     try { return localStorage.getItem("openamika.donateNever") === "1"; } catch (_) { return false; }
   }
   function showDonate(why) {
-    if (KIOSK || donateNever() || !donateModal || !donateModal.hidden) return;
+    if (PET || KIOSK || donateNever() || !donateModal || !donateModal.hidden) return;
     if (document.querySelector(".oa-wizard-backdrop")) {
       if (why === "first") setTimeout(() => showDonate(why), 30 * 1000);
       return;
@@ -68,7 +68,7 @@
     $("donate-later").focus();
   }
   function hideDonate() { if (donateModal) donateModal.hidden = true; }
-  if (donateModal) {
+  if (donateModal && !PET) {
     $("donate-close").addEventListener("click", hideDonate);
     $("donate-later").addEventListener("click", hideDonate);
     $("donate-never").addEventListener("click", () => {
@@ -129,6 +129,11 @@
       canvas: $("stageCanvas"),
       area: $("stageArea"),
       fixed: PET,                                 // the pet: she always fills her window, no drag/zoom of the model
+      onProgress: (step) => {
+        // These are loading stages, not measured download percentages.
+        $("avatarLoadingText").textContent = step >= 80 ? "Preparing avatar…"
+          : step >= 40 ? "Downloading avatar…" : "Loading avatar…";
+      },
       onChunkStart: (meta, emotion) => {
         if (meta && meta.kind === "wizard") { if (meta.onstart) meta.onstart(); return; }   // her wizard lines: no turn bookkeeping
         const kind = (meta && meta.kind) || null;
@@ -156,19 +161,24 @@
         }
       },
       onQueueEmpty: () => {},
-    });
+    }).catch((error) => {
+      console.warn("[avatar] startup failed:", error);
+      return { ok: false, reason: "load-failed" };
+    }).finally(() => { $("avatarLoading").hidden = true; });
     avatarReady = !!result.ok;
     syncBusy();
     if (!result.ok) {
       $("stageEmpty").hidden = false;
-      if (result.reason === "load-failed") {
-        $("stageEmpty").querySelector(".big").textContent = "Model failed to load";
+      if (result.reason !== "no-models") {
+        $("stageEmpty").querySelector(".big").textContent = "Avatar couldn't load";
+        $("stageEmpty").lastElementChild.textContent = "Reload the page to try again.";
       }
       return;
     }
     const select = $("modelSelect");
     select.hidden = avatar.models.length < 2;
     $("resetViewBtn").hidden = false;
+    $("modelHead").hidden = false;
     select.replaceChildren(...avatar.models.map((m) =>
       el("option", { value: m.id, text: m.name, selected: m.id === avatar.currentId ? "" : null })));
     select.addEventListener("change", async () => {
@@ -204,26 +214,63 @@
     return state;
   }
 
-  // the background panel is a popover off the picture button: closed by default, your last choice remembered
-  function showScenePanel(open) {
-    $("scenePanel").hidden = !open;
-    $("sceneBtn").classList.toggle("on", open);
-    $("sceneBtn").setAttribute("aria-pressed", String(open));
+  // the scene panel and the expand menu are popovers off the stage tools: one open at a time, closed by a tap on the
+  // stage or Escape
+  function closePopovers() {
+    const voiceFocused = $("petVoice").contains(document.activeElement);
+    $("expandMenu").hidden = true; $("fsBtn").setAttribute("aria-expanded", "false");
+    $("scenePanel").hidden = true; $("sceneBtn").setAttribute("aria-expanded", "false");
+    $("petSetup").hidden = true;
+    $("petVoice").hidden = true;
+    if (voiceFocused) $("fsBtn").focus();
   }
-  let sceneOpen = false;
-  try { sceneOpen = localStorage.getItem("openamika-scene-panel") === "open"; } catch (_) {}
-  showScenePanel(sceneOpen);
   $("sceneBtn").addEventListener("click", () => {
     const open = $("scenePanel").hidden;
-    showScenePanel(open);
-    try { localStorage.setItem("openamika-scene-panel", open ? "open" : "closed"); } catch (_) {}
+    closePopovers();
+    $("scenePanel").hidden = !open;
+    $("sceneBtn").setAttribute("aria-expanded", String(open));
+    if (open) $("bgBlur").focus();
   });
-  // clicks/drags inside the controls must not grab or zoom the model
-  for (const box of [$("scenePanel"), $("petSetup"), $("petAway"), document.querySelector(".stage-topbar")]) {
+  // clicks/drags inside the controls must not grab or zoom the model (the engine listens on the whole stage)
+  for (const box of document.querySelectorAll(".u-top, .u-menu, .u-panel, .u-dock, .u-drawer, .u-pip, .u-cam-badge, .pet-away-note")) {
+
     for (const evt of ["mousedown", "touchstart", "wheel"]) {
       box.addEventListener(evt, (e) => e.stopPropagation(), { passive: evt !== "wheel" });
     }
   }
+  stageArea.addEventListener("pointerdown", (e) => {
+    if (!e.target.closest(".u-menu, .u-panel, .u-tools")) closePopovers();
+  });
+
+  // ── lock: her position stays put — no drag, wheel or pinch moves her; on the page a finger or the wheel scrolls it ──
+  const LOCK_KEY = "openamika-stageLocked";
+  let locked = false;
+  try { locked = localStorage.getItem(LOCK_KEY) === "1"; } catch (_) {}
+  let lockHintTimer = null, lockHintAt = 0;
+  function lockHint() {
+    const now = Date.now();
+    if (now - lockHintAt < 400) return;
+    lockHintAt = now;
+    $("lockHint").classList.add("show");
+    clearTimeout(lockHintTimer);
+    lockHintTimer = setTimeout(() => $("lockHint").classList.remove("show"), 1100);
+  }
+  function setLocked(on, quiet) {
+    locked = !!on;
+    try { localStorage.setItem(LOCK_KEY, locked ? "1" : "0"); } catch (_) {}
+    if (avatar.setLocked) avatar.setLocked(locked);
+    stageArea.classList.toggle("u-locked", locked);
+    $("lockBtn").setAttribute("aria-pressed", String(locked));
+    $("lockBtn").title = locked ? "Unlock her position (L)" : "Lock her position (L)";
+    $("lockBtn").querySelector("use").setAttribute("href", locked ? "#i-lock" : "#i-unlock");
+    $("resetViewBtn").disabled = locked;
+    if (!quiet) toast(locked ? "Position locked — taps and scrolls won't move her." : "Unlocked — drag to move her, scroll or pinch to zoom.");
+  }
+  setLocked(locked, true);
+  $("lockBtn").addEventListener("click", () => setLocked(!locked));
+  // a press or a wheel on her while locked: say why nothing moves (a finger just scrolls the page, no note)
+  stageArea.addEventListener("mousedown", () => { if (locked) lockHint(); });
+  stageArea.addEventListener("wheel", () => { if (locked) lockHint(); }, { passive: true });
 
   $("bgFile").addEventListener("change", async () => {
     const file = $("bgFile").files && $("bgFile").files[0];
@@ -257,49 +304,97 @@
   });
 
   // ── camera → she can see (frames go to /ws/camera; the local VLM describes them) ──
+  // Front camera (and any desktop webcam): your self-view in the preview box. Back camera (phones): no self-view — the
+  // feed becomes her background. Either way the frames she gets come off the same stream, unmirrored.
   let camWs = null, camStream = null, camVideo = null, camTimer = null, camPoll = null, camActive = false;
-  const camPip = $("camPip"), camPipVideo = $("camPipVideo");   // your self-view: the same stream, mirrored by CSS only
+  let camStarting = false, camRequest = 0;
+  let camFacing = null;          // asked for: null = the camera picked in Settings; "user" / "environment" after a flip
+  let camLiveFacing = "";        // what the open camera reports it is ("" on desktop webcams)
+  let camCanFlip = false;        // the open camera reports a facing mode: a phone / tablet with front + back cameras
+  const camPip = $("camPip"), camPipVideo = $("camPipVideo"), stageCamVideo = $("stageCamVideo");
+
+  function camShowFeed() {
+    const back = camActive && camLiveFacing === "environment";
+    camPipVideo.srcObject = camActive && !back ? camStream : null;
+    stageCamVideo.srcObject = back ? camStream : null;
+    if (camActive) (back ? stageCamVideo : camPipVideo).play().catch(() => {});
+    camPip.hidden = !camActive || back;
+    $("camBadge").hidden = !back;
+    stageArea.classList.toggle("u-cam-back", back);
+    stageArea.classList.toggle("cam-live", camActive);
+    $("flipBtn").hidden = !(camActive && camCanFlip);
+    $("flipBtn").title = back ? "Switch to front camera" : "Switch to back camera";
+    const btn = $("camBtn");
+    btn.setAttribute("aria-pressed", String(camActive));
+    btn.querySelector("use").setAttribute("href", camActive ? "#i-cam" : "#i-cam-off");
+    if (!camActive) btn.title = "Camera off — let her see you (C)";
+    if (camActive && !back) requestAnimationFrame(placePip);
+  }
 
   function camStop(silent) {
+    camRequest++;
+    camStarting = false;
     camActive = false;
     clearInterval(camTimer); camTimer = null;
     clearInterval(camPoll); camPoll = null;
     if (camWs) { try { camWs.close(); } catch (_) {} camWs = null; }
     if (camStream) { for (const t of camStream.getTracks()) t.stop(); camStream = null; }
     camVideo = null;
-    camPipVideo.srcObject = null;
-    camPip.hidden = true;
-    stageArea.classList.remove("cam-live");
-    $("camBtn").classList.remove("live");
-    $("camBtn").title = "Camera — let her see you";
+    camShowFeed();
     if (!silent) toast("Camera off — she can't see you anymore.");
   }
 
+  // a phone's front or back camera by facing mode; "exact" first so a laptop never silently hands back its one webcam
+  async function openFacing(facing, video) {
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ video: { ...video, facingMode: { exact: facing } }, audio: false }); }
+    catch (error) {
+      if (error.name !== "OverconstrainedError" && error.name !== "NotFoundError") throw error;
+      stream = await navigator.mediaDevices.getUserMedia({ video: { ...video, facingMode: facing }, audio: false });
+    }
+    refreshDevices();
+    return stream;
+  }
+
   async function camStart() {
+    if (camActive || camStarting) return;
+    const request = ++camRequest;
+    camStarting = true;
     let vision = null;
     try { vision = await getJSON("/api/vision"); } catch (_) {}
+    if (request !== camRequest) return;
     if (vision && !vision.enabled) {
+      camStarting = false;
       toast("Vision is disabled — add the vision block in settings.json and relaunch.", true);
       return;
     }
+    const video = { width: { ideal: 640 }, height: { ideal: 480 } };
+    let stream;
     try {
-      camStream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 640 }, height: { ideal: 480 } }, audio: false,
-      });
-    } catch (_) { toast("Camera unavailable or permission denied.", true); return; }
+      stream = camFacing ? await openFacing(camFacing, video) : await openMedia("cam", { video, audio: false });
+    } catch (_) {
+      if (request === camRequest) { camStarting = false; toast("Camera unavailable or permission denied.", true); }
+      return;
+    }
+    if (request !== camRequest) { stream.getTracks().forEach((t) => t.stop()); return; }
+    camStream = stream;
+    const track = camStream.getVideoTracks()[0];
+    let caps = {}, settings = {};
+    try { caps = (track && track.getCapabilities) ? track.getCapabilities() : {}; } catch (_) {}
+    try { settings = (track && track.getSettings) ? track.getSettings() : {}; } catch (_) {}
+    camLiveFacing = settings.facingMode || camFacing || "";
+    camCanFlip = !!((Array.isArray(caps.facingMode) && caps.facingMode.length) || settings.facingMode);
     camVideo = document.createElement("video");
     camVideo.srcObject = camStream; camVideo.muted = true; camVideo.playsInline = true;
     try { await camVideo.play(); } catch (_) {}
+    if (request !== camRequest) return;
+    camStarting = false;
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    camWs = new WebSocket(`${proto}://${location.host}/ws/camera`);
+    const socket = camWs = new WebSocket(`${proto}://${location.host}/ws/camera`);
     camWs.binaryType = "arraybuffer";
-    camWs.onclose = () => { if (camActive) camStop(true); };
+    camWs.onclose = () => { if (camWs === socket) camStop(true); };
     camActive = true;
-    $("camBtn").classList.add("live");
-    camPipVideo.srcObject = camStream;      // no second getUserMedia; the frames she gets come off camVideo, unmirrored
-    camPipVideo.play().catch(() => {});
-    camPip.hidden = false;
-    stageArea.classList.add("cam-live");    // the HUD text wraps clear of the preview
+    camShowFeed();                          // no second getUserMedia: the self-view / background play the same stream
     const canvas = document.createElement("canvas");
     camTimer = setInterval(() => {          // ~2 fps JPEG, plenty for scene description
       if (!camActive || !camWs || camWs.readyState !== 1 || !camVideo || camVideo.readyState < 2) return;
@@ -308,61 +403,214 @@
       canvas.width = w; canvas.height = h;
       canvas.getContext("2d").drawImage(camVideo, 0, 0, w, h);
       canvas.toBlob((blob) => {
-        if (blob && camWs && camWs.readyState === 1 && camWs.bufferedAmount < 1000000) {
-          blob.arrayBuffer().then((buf) => { try { camWs.send(buf); } catch (_) {} });
+        if (blob && camWs === socket && socket.readyState === 1 && socket.bufferedAmount < 1000000) {
+          blob.arrayBuffer().then((buf) => { if (camWs === socket) { try { socket.send(buf); } catch (_) {} } });
         }
       }, "image/jpeg", 0.7);
     }, 500);
+    $("camBtn").title = "Camera on — she's looking… (C)";
     camPoll = setInterval(async () => {     // hover the button to read what she sees
       try {
         const v = await getJSON("/api/vision");
-        $("camBtn").title = v.description ? "She sees: " + v.description : "Camera live — she's looking…";
+        if (camWs !== socket) return;
+        $("camBtn").title = v.description ? "She sees: " + v.description : "Camera on — she's looking… (C)";
       } catch (_) {}
     }, 4000);
-    toast("Camera on — she can see you now.");
+    if (!fellBack.has(camStream)) {         // else the "not connected" note stays up
+      toast(camLiveFacing === "environment" ? "Back camera — she sees what you see." : "Camera on — she can see you now.");
+    }
   }
 
-  $("camBtn").addEventListener("click", () => (camActive ? camStop() : camStart()));
+  $("camBtn").addEventListener("click", () => {
+    if (petBlocked()) return;
+    if (camActive || camStarting) camStop(); else camStart();
+  });
+  $("flipBtn").addEventListener("click", () => {
+    camFacing = camLiveFacing === "environment" ? "user" : "environment";
+    camStop(true);
+    camStart();
+  });
   window.addEventListener("beforeunload", () => camStop(true));
 
-  $("fsBtn").addEventListener("click", () => {
-    if (document.fullscreenElement) { document.exitFullscreen(); return; }
-    const go = stageArea.requestFullscreen || stageArea.webkitRequestFullscreen;
-    if (go) go.call(stageArea);
-    else toast("This browser doesn't allow fullscreen here.", true);
+  // ── your preview box: drag it anywhere between the top bar and the dock, tap it for Hide; hidden it is a small
+  // pill (the camera stays on) that a tap brings back. Where it sits and whether it is hidden: per browser. ──
+  const PIP_POS = "openamika-camPipPos", PIP_HIDDEN = "openamika-camPipHidden";
+  let pipPos = null;                       // {fx, fy}: a share of the free space, so it survives resizes
+  try { pipPos = JSON.parse(localStorage.getItem(PIP_POS) || "null"); } catch (_) {}
+  function pipBounds() {
+    const m = 10, s = stageArea.getBoundingClientRect();
+    const top = document.querySelector(".u-top").getBoundingClientRect().bottom - s.top + 8;
+    const dockTop = document.querySelector(".u-dock").getBoundingClientRect().top - s.top - 8;
+    const minY = Math.min(top, Math.max(m, dockTop - camPip.offsetHeight));
+    return { minX: m, minY, maxX: s.width - camPip.offsetWidth - m, maxY: Math.max(minY, dockTop - camPip.offsetHeight) };
+  }
+  function pipMoveTo(x, y) {
+    const b = pipBounds();
+    camPip.style.left = Math.max(b.minX, Math.min(b.maxX, x)) + "px";
+    camPip.style.top = Math.max(b.minY, Math.min(b.maxY, y)) + "px";
+  }
+  function placePip() {
+    if (camPip.hidden) return;
+    const b = pipBounds();
+    if (!pipPos) { pipMoveTo(12, b.minY); return; }
+    pipMoveTo(b.minX + pipPos.fx * (b.maxX - b.minX), b.minY + pipPos.fy * (b.maxY - b.minY));
+  }
+  function savePip() {
+    const b = pipBounds(), x = camPip.offsetLeft, y = camPip.offsetTop;
+    pipPos = { fx: (x - b.minX) / Math.max(1, b.maxX - b.minX), fy: (y - b.minY) / Math.max(1, b.maxY - b.minY) };
+    try { localStorage.setItem(PIP_POS, JSON.stringify(pipPos)); } catch (_) {}
+  }
+  function pipCollapse(on, quiet) {
+    camPip.classList.toggle("collapsed", on);
+    camPip.classList.remove("armed");
+    try { localStorage.setItem(PIP_HIDDEN, on ? "1" : "0"); } catch (_) {}
+    camPip.setAttribute("aria-label", on ? "Your camera preview is hidden; the camera is still on. Enter to show it; drag to move."
+                                         : "Your camera preview. Drag or use arrow keys to move; Enter for options.");
+    requestAnimationFrame(placePip);
+    if (!quiet && on) toast("Preview hidden — she can still see you.");
+  }
+  let pipDisarm = null;
+  function pipArm(on) {
+    clearTimeout(pipDisarm);
+    camPip.classList.toggle("armed", on);
+    if (on) pipDisarm = setTimeout(() => camPip.classList.remove("armed"), 3500);
+  }
+  let pipWasHidden = false;
+  try { pipWasHidden = localStorage.getItem(PIP_HIDDEN) === "1"; } catch (_) {}
+  pipCollapse(pipWasHidden, true);
+  let pipDrag = null;
+  camPip.addEventListener("pointerdown", (e) => {
+    if (e.target.closest("#pipHideBtn")) return;
+    camPip.setPointerCapture(e.pointerId);
+    pipDrag = { id: e.pointerId, sx: e.clientX, sy: e.clientY, ox: camPip.offsetLeft, oy: camPip.offsetTop, moved: false };
   });
+  camPip.addEventListener("pointermove", (e) => {
+    if (!pipDrag || e.pointerId !== pipDrag.id) return;
+    const dx = e.clientX - pipDrag.sx, dy = e.clientY - pipDrag.sy;
+    if (!pipDrag.moved && Math.hypot(dx, dy) < 6) return;      // under 6 px it's still a tap
+    if (!pipDrag.moved) { pipDrag.moved = true; camPip.classList.add("moving"); pipArm(false); }
+    pipMoveTo(pipDrag.ox + dx, pipDrag.oy + dy);
+  });
+  function pipUp(e) {
+    if (!pipDrag || e.pointerId !== pipDrag.id) return;
+    const tap = !pipDrag.moved && e.type === "pointerup";
+    pipDrag = null;
+    camPip.classList.remove("moving");
+    if (!tap) { savePip(); return; }
+    if (camPip.classList.contains("collapsed")) pipCollapse(false);
+    else pipArm(!camPip.classList.contains("armed"));
+  }
+  camPip.addEventListener("pointerup", pipUp);
+  camPip.addEventListener("pointercancel", pipUp);
+  $("pipHideBtn").addEventListener("click", (e) => { e.stopPropagation(); pipCollapse(true); camPip.focus(); });
+  camPip.addEventListener("keydown", (e) => {
+    if (e.target !== camPip) return;
+    const step = e.shiftKey ? 48 : 16;
+    const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
+    if (d) { e.preventDefault(); e.stopPropagation(); pipMoveTo(camPip.offsetLeft + d[0], camPip.offsetTop + d[1]); savePip(); return; }
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault(); e.stopPropagation();
+      if (camPip.classList.contains("collapsed")) pipCollapse(false);
+      else { pipArm(true); $("pipHideBtn").focus(); }
+    }
+  });
+  stageArea.addEventListener("pointerdown", (e) => { if (!camPip.contains(e.target)) pipArm(false); });
 
-  // TravelProp-style fullscreen: the live controls move into a floating glass bar
-  const fsBar = el("div", { class: "fs-bar" });
-  stageArea.append(fsBar);
-  for (const evt of ["mousedown", "touchstart", "wheel"]) {
-    fsBar.addEventListener(evt, (e) => e.stopPropagation(), { passive: evt !== "wheel" });
-  }
-  const FS_CONTROLS = ["powerBtn", "micBtn", "sayForm", "stopBtn"];
-  const fsHomes = new Map();   // id -> {parent, next} to restore the page layout
-  function enterFsLayout() {
-    for (const id of FS_CONTROLS) {
-      const node = $(id);
-      fsHomes.set(id, { parent: node.parentNode, next: node.nextSibling });
-      fsBar.append(node);
-    }
-  }
-  function exitFsLayout() {
-    for (const id of [...fsHomes.keys()].reverse()) {
-      const home = fsHomes.get(id);
-      home.parent.insertBefore($(id), home.next);
-    }
-    fsHomes.clear();
-  }
-  document.addEventListener("fullscreenchange", () => {
-    const fs = !!document.fullscreenElement;
-    $("fsBtn").title = fs ? "Exit fullscreen" : "Fullscreen";
-    if (fs && !fsHomes.size) enterFsLayout();
-    else if (!fs && fsHomes.size) exitFsLayout();
-    // let the layout settle, then resize the renderer + remap the model
+  // ── go big: "Fill window" (the stage covers the tab, the browser stays — the only kind an iPhone allows) or real
+  // fullscreen. Both keep the same dock, plus the transcript as a panel over the stage. ──
+  let bigMode = null;                      // null | "window" | "fullscreen"
+  const canFullscreen = document.fullscreenEnabled !== false && !!(stageArea.requestFullscreen || stageArea.webkitRequestFullscreen);
+  $("fsOpt").hidden = !canFullscreen;
+  function afterResize() {
+    // let the layout settle, then resize the renderer + remap the model, and keep the preview inside the stage
     requestAnimationFrame(() => requestAnimationFrame(() => {
       if (avatar.notifyResize) avatar.notifyResize();
+      placePip();
     }));
+  }
+  function setBig(mode) {
+    bigMode = mode;
+    stageArea.classList.toggle("u-big", !!mode);
+    document.body.classList.toggle("u-big-open", !!mode);
+    const btn = $("fsBtn");
+    btn.querySelector("use").setAttribute("href", mode ? "#i-shrink" : "#i-expand");
+    btn.title = mode ? "Exit (Esc)" : "Go big";
+    btn.setAttribute("aria-haspopup", mode ? "false" : "menu");
+    for (const outside of document.querySelectorAll(".oa-nav, .oa-footer, .u-side, .u-telemetry")) outside.inert = !!mode;
+    if (!mode) drawerOpen(false);
+    btn.focus();
+    afterResize();
+  }
+  async function enterBig(mode) {
+    closePopovers();
+    if (mode === "fullscreen") {
+      try { await (stageArea.requestFullscreen || stageArea.webkitRequestFullscreen).call(stageArea); }
+      catch (_) { toast("Fullscreen was blocked — filling the window instead."); mode = "window"; }
+    }
+    setBig(mode);
+  }
+  function exitBig() {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    setBig(null);
+  }
+  $("fsBtn").addEventListener("click", () => {
+    if (bigMode) { exitBig(); return; }
+    const open = $("expandMenu").hidden;
+    closePopovers();
+    $("expandMenu").hidden = !open;
+    $("fsBtn").setAttribute("aria-expanded", String(open));
+    if (open) $("expandMenu").querySelector(".u-opt").focus();
+  });
+  $("expandMenu").addEventListener("click", (e) => {
+    const opt = e.target.closest("[data-mode]");
+    if (opt) enterBig(opt.dataset.mode);
+  });
+  $("expandMenu").addEventListener("keydown", (e) => {
+    const opts = [...$("expandMenu").querySelectorAll(".u-opt:not([hidden])")];
+    const i = opts.indexOf(document.activeElement);
+    if (e.key === "ArrowDown") { e.preventDefault(); opts[(i + 1) % opts.length].focus(); }
+    if (e.key === "ArrowUp") { e.preventDefault(); opts[(i - 1 + opts.length) % opts.length].focus(); }
+  });
+  document.addEventListener("fullscreenchange", () => {
+    if (!document.fullscreenElement && bigMode === "fullscreen") setBig(null);
+    else afterResize();
+  });
+  window.addEventListener("resize", () => requestAnimationFrame(placePip));
+
+  // big mode's transcript panel
+  function drawerOpen(open) {
+    $("drawer").hidden = !open;
+    $("drawerBtn").setAttribute("aria-pressed", String(open));
+    if (open) { const log = $("drawerLog"); log.scrollTop = log.scrollHeight; $("drawerClose").focus(); }
+    else if ($("drawer").contains(document.activeElement)) $("drawerBtn").focus();
+  }
+  $("drawerBtn").addEventListener("click", () => drawerOpen($("drawer").hidden));
+  $("drawerClose").addEventListener("click", () => drawerOpen(false));
+
+  // keyboard: W fill window · F fullscreen · L lock · M mic · C camera · Esc closes / exits — never while typing
+  document.addEventListener("keydown", (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented || e.isComposing) return;
+    const t = e.target;
+    if ((donateModal && !donateModal.hidden) || document.querySelector(".oa-wizard-backdrop")) return;
+    const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    if (key === "Escape") {
+      if (!$("expandMenu").hidden || !$("scenePanel").hidden || !$("petSetup").hidden || !$("petVoice").hidden) {
+        const trigger = !$("scenePanel").hidden ? $("sceneBtn") : $("fsBtn");
+        closePopovers(); trigger.focus();
+      }
+      else if (camPip.classList.contains("armed")) { pipArm(false); camPip.focus(); }
+      else if (!$("drawer").hidden) drawerOpen(false);
+      else if (bigMode === "window") exitBig();
+      return;
+    }
+    if (e.repeat || (t && t.closest && t.closest("input, select, textarea, [contenteditable]"))) return;
+    // The pet has no camera or page-layout controls. Keep only its visible mic shortcut.
+    if (PET && key !== "m") return;
+    if (key === "w") bigMode ? exitBig() : enterBig("window");
+    else if (key === "f" && canFullscreen) bigMode ? exitBig() : enterBig("fullscreen");
+    else if (key === "l") setLocked(!locked);
+    else if (key === "m") $("micBtn").click();
+    else if (key === "c") $("camBtn").click();
   });
 
   // ── SFX cache ──
@@ -375,26 +623,66 @@
     }
   }).catch(() => {});
 
-  // ── chat log ──
-  const chatLog = $("chatLog");
+  // ── chat log (the side panel's Transcript, mirrored in big mode's transcript panel) ──
+  const chatLog = $("chatLog"), drawerLog = $("drawerLog");
   let chatEmpty = true;
   function chatAdd(kind, who, text, extra) {
     if (!text) return;
-    if (chatEmpty) { chatLog.replaceChildren(); chatEmpty = false; }
+    if (chatEmpty) { chatLog.replaceChildren(); drawerLog.replaceChildren(); chatEmpty = false; }
     const line = el("div", { class: "chat-line " + kind },
       el("span", { class: "who", text: who }), text);
     if (extra) line.append(el("div", { class: "thought", text: extra }));
     chatLog.append(line);
-    while (chatLog.children.length > 120) chatLog.firstChild.remove();
-    chatLog.scrollTop = chatLog.scrollHeight;
+    drawerLog.append(line.cloneNode(true));
+    for (const log of [chatLog, drawerLog]) {
+      while (log.children.length > 120) log.firstChild.remove();
+      log.scrollTop = log.scrollHeight;
+    }
+  }
+
+  // ── side panel tabs: Transcript · Settings · Helpers (Helpers only while a helper is set up or has work) ──
+  const tabs = [...document.querySelectorAll(".u-tab")];
+  function pickTab(tab) {
+    for (const t of tabs) {
+      const on = t === tab;
+      t.setAttribute("aria-selected", String(on));
+      t.tabIndex = on ? 0 : -1;
+      $(t.getAttribute("aria-controls")).hidden = !on;
+    }
+    if (tab.id === "t-chat") chatLog.scrollTop = chatLog.scrollHeight;
+  }
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => pickTab(tab));
+    tab.addEventListener("keydown", (e) => {
+      const d = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+      if (!d) return;
+      const shown = tabs.filter((t) => !t.hidden);
+      const next = shown[(shown.indexOf(tab) + d + shown.length) % shown.length];
+      pickTab(next); next.focus();
+    });
+  });
+  let helpWaiting = 0;                       // approvals / questions waiting for you (set by the jobs card)
+  function updateHelpTab() {
+    const pro = document.documentElement.classList.contains("mode-pro");
+    const jobs = !$("jobsCard").hidden, dialogue = !$("toolDialogCard").hidden && pro;
+    const tab = $("t-help");
+    tab.hidden = !jobs && !dialogue;
+    $("helpEmpty").hidden = jobs || dialogue;
+    $("helpCount").hidden = !helpWaiting;
+    $("helpCount").textContent = String(helpWaiting);
+    tab.title = helpWaiting ? helpWaiting + " waiting for your answer" : "";
+    if (tab.hidden && tab.getAttribute("aria-selected") === "true") pickTab($("t-chat"));
   }
 
   // ── power / socket ──
   let ws = null, wsWanted = false, reconnectTimer = null;
   let micActive = false, micStream = null, micCtx = null, micSrc = null, micNode = null;
+  let micStarting = false, micRequest = 0;
+  let petAudioNames = null;
   // she is out in her desktop pet window (the "Desktop pet" button, below): this page rests until she is back
   let petOut = false;
   const offHint = () => (petOut ? "she is on your desktop" : "press power to connect");
+
   // current turn's id; audio tagged for another turn is dropped (classic-console guard)
   let ttsTurnBase = "";
 
@@ -402,14 +690,43 @@
     $("powerState").textContent = state;
     $("powerDetail").textContent = detail || "";
     const on = state === "Online" || state === "Listening";
-    $("powerBtn").classList.toggle("on", on);
-    $("sessionDot").className = "dot " + (on ? "ok" : state === "Connecting" ? "warn" : "");
+    const power = $("powerBtn");
+    power.setAttribute("aria-pressed", String(on || state === "Connecting"));
+    power.classList.toggle("connecting", state === "Connecting");
+    power.title = on || state === "Connecting" ? "Disconnect" : "Connect";
+    if (PET && petAudioNames) power.title += " — Audio output: " + (petAudioNames.speaker || "System default");
+    $("sessionDot").className = "dot " + (micActive && on ? "live" : on ? "ok" : state === "Connecting" ? "warn" : "");
     setNavDot(1, on ? "ok" : "err");
-    $("sayBtn").disabled = !on;
+    $("sayBtn").disabled = !on || !$("sayInput").value.trim();
     $("stopBtn").disabled = !on;
     $("injectBtn").disabled = !on;
     $("ctxBtn").disabled = !on;
-    $("micBtn").classList.toggle("live", micActive);
+    setMicUI();
+  }
+  // the send arrow lights up only with something to send
+  function syncSend() { $("sayBtn").disabled = !(ws && ws.readyState === 1) || !$("sayInput").value.trim(); }
+  $("sayInput").addEventListener("input", syncSend);
+  function setMicUI() {
+    const btn = $("micBtn");
+    btn.setAttribute("aria-pressed", String(micActive));
+    btn.querySelector("use").setAttribute("href", PET || micActive ? "#i-mic" : "#i-mic-off");
+    btn.title = micActive ? "Mic on — tap to mute (M)" : "Mic off — tap to talk (M)";
+    if (PET && petAudioNames) btn.title += " — " + (micStream?.getAudioTracks()[0]?.label || petAudioNames.mic || "System default");
+  }
+  // the mic button's ring follows your voice level
+  let micMeterRaf = 0;
+  function micMeter(analyser) {
+    const buf = new Float32Array(analyser.fftSize);
+    const tick = () => {
+      if (!micActive) { $("micBtn").style.setProperty("--lvl", 0); micMeterRaf = 0; return; }
+      analyser.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      $("micBtn").style.setProperty("--lvl", Math.min(1, Math.sqrt(sum / buf.length) * 6).toFixed(3));
+      micMeterRaf = requestAnimationFrame(tick);
+    };
+    cancelAnimationFrame(micMeterRaf);
+    micMeterRaf = requestAnimationFrame(tick);
   }
   setPowerUI("Offline", "press power to connect");
 
@@ -419,18 +736,21 @@
   }
 
   function connect() {
+    clearTimeout(reconnectTimer);
     wsWanted = true;
     setPowerUI("Connecting", "opening dialog socket…");
-    const socket = new WebSocket(wsURL());
-    ws = socket;
+    const socket = ws = new WebSocket(wsURL());
+
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
+      if (ws !== socket) return;
       setPowerUI("Online", "connected · " + (micActive ? "mic live" : "text & mic ready"));
       ws.send(JSON.stringify({ type: "settings", voice_output: $("voiceOutToggle").checked }));
       pollStatus();
     };
     ws.onclose = () => {
-      if (ws && ws !== socket) return;             // a newer socket is live (off, then on again at once): not its end
+      if (ws !== socket) return;
+
       ws = null;
       stopMic(true);
       avatar.flush();
@@ -444,6 +764,7 @@
     };
     ws.onerror = () => {};
     ws.onmessage = (event) => {
+      if (ws !== socket) return;
       if (typeof event.data !== "string") return;
       let msg;
       try { msg = JSON.parse(event.data); } catch (_) { return; }
@@ -457,7 +778,9 @@
     stopMic(true);
     if (ws) { try { ws.close(); } catch (_) {} ws = null; }
     avatar.flush();
+    resetEmote();  // the retired socket's onclose is ignored, so explicit disconnect owns this cleanup
     setPowerUI("Offline", offHint());
+
   }
 
   $("powerBtn").addEventListener("click", () => {
@@ -511,21 +834,32 @@ registerProcessor('pcm-pusher', PCMPusher);`;
     return URL.createObjectURL(new Blob([code], { type: "application/javascript" }));
   }
 
-  async function startMic() {
-    if (micActive) return;
+  async function startMic(strictDevice = false) {
+    if (micActive || micStarting) return;
+    const request = ++micRequest;
+    micStarting = true;
     if (!wsWanted) connect();
+    let stream;
     try {
-      micStream = await navigator.mediaDevices.getUserMedia({
+      stream = await openMedia("mic", {
         audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
-      });
+      }, strictDevice);
     } catch (error) {
-      toast("Microphone was refused: " + error.message, true);
+      if (request === micRequest) { micStarting = false; toast("Microphone was refused: " + error.message, true); }
       return;
     }
-    try { micCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_SR }); }
-    catch (_) { micCtx = new (window.AudioContext || window.webkitAudioContext)(); }
-    try { await micCtx.audioWorklet.addModule(workletURL()); }
-    catch (error) { toast("AudioWorklet failed: " + error.message, true); stopMic(true); return; }
+    if (request !== micRequest) { stream.getTracks().forEach((t) => t.stop()); return; }
+    micStream = stream;
+    const moduleURL = workletURL();
+    try {
+      try { micCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_SR }); }
+      catch (_) { micCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+      await micCtx.audioWorklet.addModule(moduleURL);
+    } catch (error) {
+      if (request === micRequest) { toast("AudioWorklet failed: " + error.message, true); stopMic(true); }
+      return;
+    } finally { URL.revokeObjectURL(moduleURL); }
+    if (request !== micRequest) return;
     micSrc = micCtx.createMediaStreamSource(micStream);
     micNode = new AudioWorkletNode(micCtx, "pcm-pusher", {
       processorOptions: { sourceRate: micCtx.sampleRate, targetRate: TARGET_SR, frameSize: 512 },
@@ -541,23 +875,135 @@ registerProcessor('pcm-pusher', PCMPusher);`;
       ws.send(JSON.stringify({ type: "hello", sample_rate: TARGET_SR, source_rate: micCtx.sampleRate }));
     }
     micActive = true;
+    micStarting = false;
+    try { const analyser = micCtx.createAnalyser(); analyser.fftSize = 1024; micSrc.connect(analyser); micMeter(analyser); } catch (_) {}
     setPowerUI("Listening", "mic is live — just talk");
   }
 
   function stopMic(silent) {
+    micRequest++;
+    micStarting = false;
     if (micNode) { try { micNode.disconnect(); } catch (_) {} micNode = null; }
     if (micSrc) { try { micSrc.disconnect(); } catch (_) {} micSrc = null; }
     if (micCtx) { try { micCtx.close(); } catch (_) {} micCtx = null; }
     if (micStream) { for (const track of micStream.getTracks()) track.stop(); micStream = null; }
     micActive = false;
     if (!silent) setPowerUI(wsWanted ? "Online" : "Offline", wsWanted ? "mic off" : "press power to connect");
-    $("micBtn").classList.remove("live");
+    setMicUI();
+    $("sessionDot").classList.remove("live");
+  }
+
+  // ── mic / camera / speaker pickers (saved per browser; "" = the system default) ──
+  const DEVICE_UI = [
+    { kind: "mic", select: $("micSelect"), md: "audioinput", noun: "Microphone", hint: "turn the mic on once to list them" },
+    { kind: "cam", select: $("camSelect"), md: "videoinput", noun: "Camera", hint: "turn the camera on once to list them" },
+    { kind: "speaker", select: $("speakerSelect"), md: "audiooutput", noun: "Speaker", hint: "turn the mic on once to list them" },
+  ];
+  // getUserMedia on the picked device; one that is unplugged falls back to the default with a note
+  const fellBack = new WeakSet();     // streams opened on the default because the picked device was missing
+  async function openMedia(kind, constraints, strictDevice = false) {
+    const key = kind === "mic" ? "audio" : "video", id = devices.get(kind);
+    let stream = null;
+    if (id) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ ...constraints, [key]: { ...constraints[key], deviceId: { exact: id } } });
+      } catch (error) {
+        if (strictDevice || (error.name !== "OverconstrainedError" && error.name !== "NotFoundError")) throw error;
+        toast(`The ${kind === "mic" ? "microphone" : "camera"} you picked is not connected — using the system default.`, true);
+      }
+    }
+    if (!stream) {
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      if (id) fellBack.add(stream);
+    }
+    refreshDevices();     // names are only readable once a permission was granted
+    return stream;
+  }
+  async function refreshDevices() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    let list = [];
+    try { list = await navigator.mediaDevices.enumerateDevices(); } catch (_) { return; }
+    for (const ui of DEVICE_UI) {
+      // Chromium's "default" / "communications" entries repeat a real device; "System default" stands for them
+      const found = list.filter((d) => d.kind === ui.md && d.deviceId && d.deviceId !== "default" && d.deviceId !== "communications");
+      const saved = devices.get(ui.kind);
+      const opts = [el("option", { value: "", text: "System default" })];
+      found.forEach((d, i) => opts.push(el("option", { value: d.deviceId, text: d.label || `${ui.noun} ${i + 1}` })));
+      if (saved && !found.some((d) => d.deviceId === saved)) {
+        opts.push(el("option", { value: saved, text: found.length ? "Picked device (not connected)" : "Your saved pick" }));
+      }
+      if (!found.length) opts.push(el("option", { value: "-", text: `(${ui.hint})`, disabled: "" }));
+      ui.select.replaceChildren(...opts);
+      ui.select.value = saved;
+    }
+  }
+  $("speakerField").hidden = !devices.canPickSpeaker;
+  $("micSelect").addEventListener("change", () => {
+    devices.set("mic", $("micSelect").value);
+    if (micActive || micStarting) { stopMic(true); startMic(); }
+  });
+  $("camSelect").addEventListener("change", () => {
+    devices.set("cam", $("camSelect").value);
+    camFacing = null;
+    if (camActive || camStarting) { camStop(true); camStart(); }
+  });
+  $("speakerSelect").addEventListener("change", async () => {
+    const id = $("speakerSelect").value;
+    devices.set("speaker", id);
+    if (!(await avatar.setOutputDevice(id))) toast("That speaker could not be used — check it is connected.", true);
+  });
+  if (navigator.mediaDevices) {
+    navigator.mediaDevices.addEventListener("devicechange", refreshDevices);
+    refreshDevices();
   }
 
   $("micBtn").addEventListener("click", () => {
     if (petBlocked()) return;
-    if (micActive) stopMic(); else startMic();
+    if (micActive || micStarting) stopMic(); else startMic();
   });
+
+  // IDs are private to a browser profile/origin. Transfer exact device names, then resolve this WebView's own IDs.
+  async function audioForPet() {
+    const selections = { mic: devices.get("mic"), speaker: devices.get("speaker") };
+    const list = Object.values(selections).some(Boolean) ? await navigator.mediaDevices.enumerateDevices() : [];
+    const audio = {};
+    for (const [kind, id] of Object.entries(selections)) {
+      if (!id || id === "default") { audio[kind] = ""; continue; }
+      const device = list.find(d => d.kind === (kind === "mic" ? "audioinput" : "audiooutput") && d.deviceId === id);
+      if (!device?.label || device.label.length > 256) {
+        throw new Error(`Select an available ${kind === "mic" ? "microphone" : "audio output"} in Settings before moving her.`);
+      }
+      audio[kind] = device.label;
+    }
+    return audio;
+  }
+
+  async function applyPetAudio(audio) {
+    const list = Object.values(audio).some(Boolean) ? await navigator.mediaDevices.enumerateDevices() : [];
+    const selected = {};
+    for (const kind of ["mic", "speaker"]) {
+      if (!audio[kind]) { selected[kind] = ""; continue; }
+      const found = list.filter(d => d.kind === (kind === "mic" ? "audioinput" : "audiooutput") &&
+        d.label === audio[kind] && d.deviceId && !["default", "communications"].includes(d.deviceId));
+      if (found.length !== 1) {
+        throw new Error(`The selected ${kind === "mic" ? "microphone" : "audio output"} (${audio[kind]}) ${found.length ? "has more than one matching device" : "is unavailable in the desktop window"}.`);
+      }
+      selected[kind] = found[0].deviceId;
+    }
+    if (selected.speaker && !devices.canPickSpeaker) throw new Error("This desktop window cannot select an audio output device.");
+    const previous = { mic: devices.get("mic"), speaker: devices.get("speaker") };
+    try {
+      devices.set("mic", selected.mic);
+      devices.set("speaker", selected.speaker);
+      await avatar.ensureAudio();
+      if (!(await avatar.setOutputDevice(selected.speaker))) throw new Error("The selected audio output could not be opened in the desktop window.");
+    } catch (error) {
+      devices.set("mic", previous.mic); devices.set("speaker", previous.speaker);
+      throw error;
+    }
+    petAudioNames = audio;
+    setPowerUI("Offline", offHint());
+  }
 
   // ── her desktop pet window, from this page: the "Desktop pet" button ──
   // GET /api/pet says whether this browser is on the PC she runs on (only there does the button show), whether her
@@ -575,8 +1021,17 @@ registerProcessor('pcm-pusher', PCMPusher);`;
   }
 
   function showPetSetup(open) {
-    if (open) showScenePanel(false);               // the two popovers share one corner
+    if (open) closePopovers();
     $("petSetup").hidden = !open;
+    if (open) $("petInstallBtn").focus();
+    else if ($("petSetup").contains(document.activeElement)) $("fsBtn").focus();
+  }
+
+  function showPetVoice(open) {
+    if (open) closePopovers();
+    $("petVoice").hidden = !open;
+    if (open) $("petVoiceNo").focus();
+    else if ($("petVoice").contains(document.activeElement)) $("fsBtn").focus();
   }
 
   function setPetOut(out) {
@@ -585,15 +1040,18 @@ registerProcessor('pcm-pusher', PCMPusher);`;
     stageArea.classList.toggle("pet-away", out);
     $("petAway").hidden = !out;
     $("petBtn").hidden = out || !petHere();
+    for (const child of stageArea.children) if (child.id !== "petAway") child.inert = out;
     if (avatar.setPaused) avatar.setPaused(out);   // nothing of her is drawn here meanwhile
     clearInterval(petTimer);
     petTimer = null;
     if (out) {
       petMisses = 0;
-      showPetSetup(false);
-      if (camActive) camStop(true);                // her eyes do not stay on behind the note
+      closePopovers();
+      drawerOpen(false);
+      if (camActive || camStarting) camStop(true); // also cancel a pending permission request
+      $("petBackBtn").focus();
       petTimer = setInterval(() => refreshPet(true), 2500);     // her window can also close by itself
-    }
+    } else $("fsBtn").focus();
     if (!wsWanted) setPowerUI("Offline", offHint());
   }
 
@@ -621,18 +1079,24 @@ registerProcessor('pcm-pusher', PCMPusher);`;
 
   // this page lets go of her session, her window opens and takes it over; when the window does not come she is back
   // here as she was
-  async function sendToDesktop() {
-    const wasOn = wsWanted, wasMic = micActive;
-    showPetSetup(false);
-    if (document.fullscreenElement) { try { await document.exitFullscreen(); } catch (_) {} }
+  async function sendToDesktop(enableVoice = false) {
+    const voice_output = $("voiceOutToggle").checked || enableVoice;
+    if (!voice_output) { showPetVoice(true); return; }
+    let audio;
+    try { audio = await audioForPet(); }
+    catch (error) { toast(error.message, true); return; }
+    const wasOn = wsWanted, wasMic = micActive || micStarting;
+    closePopovers();
+    if (bigMode) exitBig();
     petMoving = true;                              // power and the microphone wait here until she has arrived or not
     disconnect();
     setPowerUI("Offline", "opening her desktop window…");
     let result = null, failure = "";
-    try { result = await postAction("/api/pet/open", "open-pet", { power: wasOn, mic: wasMic }); }
+    try { result = await postAction("/api/pet/open", "open-pet", { power: wasOn, mic: wasMic, voice_output, audio }); }
     catch (error) { failure = error.message; }
     petMoving = false;
     if (result && result.ok) {
+      $("voiceOutToggle").checked = voice_output;  // commit the accepted choice only after a successful move
       if (petInfo) petInfo.running = true;
       setPetOut(true);
       return;
@@ -645,6 +1109,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
 
   $("petBtn").addEventListener("click", async () => {
     if (petWorking || petOut) return;
+    closePopovers();
     petWorking = true;
     $("petBtn").disabled = true;
     try {
@@ -659,6 +1124,14 @@ registerProcessor('pcm-pusher', PCMPusher);`;
   });
   $("sceneBtn").addEventListener("click", () => showPetSetup(false));
   $("petInstallNo").addEventListener("click", () => showPetSetup(false));
+  $("petVoiceNo").addEventListener("click", () => showPetVoice(false));
+  $("petVoiceYes").addEventListener("click", async () => {
+    if (petWorking || petOut) return;
+    petWorking = true;
+    $("petVoiceYes").disabled = true;
+    try { await sendToDesktop(true); }
+    finally { petWorking = false; $("petVoiceYes").disabled = false; }
+  });
   $("petInstallBtn").addEventListener("click", async () => {
     if (petWorking) return;
     petWorking = true;
@@ -711,13 +1184,29 @@ registerProcessor('pcm-pusher', PCMPusher);`;
       let state = null;
       try { state = await window.pywebview.api.handover(); } catch (_) {}
       if (!state) return;
-      if (state.power || state.mic) avatar.ensureAudio();
-      if (state.power && !wsWanted) connect();
-      if (state.mic) startMic();
+      if (typeof state.voice_output === "boolean") $("voiceOutToggle").checked = state.voice_output;
+      const previousAudio = state.audio ? { mic: devices.get("mic"), speaker: devices.get("speaker") } : null;
+      try {
+        if (state.audio_error) throw new Error(state.audio_error);
+        if (state.audio) await applyPetAudio(state.audio);
+        if (state.power || state.mic) await avatar.ensureAudio();
+        if (state.power && !wsWanted) connect();
+        if (state.mic) {
+          await startMic(!!state.audio);
+          if (state.audio && (!micActive || fellBack.has(micStream))) throw new Error("The selected microphone could not be opened in the desktop window.");
+        }
+        if (state.audio) await window.pywebview.api.handover_done();
+      } catch (error) {
+        disconnect();
+        if (previousAudio) { devices.set("mic", previousAudio.mic); devices.set("speaker", previousAudio.speaker); }
+        if (state.audio) await window.pywebview.api.handover_done(error.message);
+        else toast(error.message, true);
+      }
     };
     const bridge = window.pywebview && window.pywebview.api;
     if (bridge && typeof bridge.handover === "function") takeOver();
     else window.addEventListener("pywebviewready", takeOver, { once: true });
+
   }
 
   // ── outgoing text / controls ──
@@ -729,6 +1218,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
     ws.send(JSON.stringify({ type: "text", text }));
     // the server echoes a `commit` for typed text — the chat line renders from that
     $("sayInput").value = "";
+    syncSend();
   });
   $("stopBtn").addEventListener("click", () => {
     if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "stop" }));
@@ -1319,6 +1809,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
     const pending = Array.isArray(d.pending) ? d.pending : [];
     const card = $("jobsCard");
     card.hidden = !jobs.length && !pending.length;             // nothing running, recent or waiting: no card at all
+    helpWaiting = pending.length + jobs.filter((j) => j.pending).length;
     if (card.hidden) { jobsSeen = ""; return; }
     const waiting = pending.length || jobs.some((j) => j.pending);
     $("jobsDot").className = "dot " + (waiting ? "warn" : jobs.some((j) => !TERMINAL_JOB[j.state]) ? "ok" : "");
@@ -1349,6 +1840,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
       avatar.setAgentVisible(agents && !PET);      // the pet window shows her alone
       avatar.setAgentBase(agentBusy ? "working" : "idle");
       if (!PET) bubbleNewLines(entries);
+      updateHelpTab();
     } catch (_) { /* the brain or the gateway is busy; try again later */ }
     toolTimer = setTimeout(pollTools, wsWanted ? 2000 : 10000);
   }
@@ -1412,6 +1904,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
           const mime = { opus: "audio/ogg", ogg: "audio/ogg", mp3: "audio/mpeg", wav: "audio/wav" }[r.audio_format] || "audio/wav";
           const a = new Audio("data:" + mime + ";base64," + r.audio);
           a.onplay = () => setSpeaking(true); a.onended = () => setSpeaking(false);
+          await devices.applySink(a);
           await a.play();
         }
         audioOK = true;

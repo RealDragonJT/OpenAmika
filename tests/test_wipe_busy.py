@@ -9,6 +9,7 @@ or a reflection still in flight brings nothing back), Unlock for the switch, and
 spin the memory writer. Offline: fake app and providers, temporary stores only.
 """
 import contextlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import shutil
@@ -19,6 +20,8 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+
+import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 BRAIN = ROOT / 'brain'
@@ -427,6 +430,102 @@ class HungStream:
 
 
 class AbortStreamsTests(unittest.TestCase):
+    def test_abort_returns_while_http_server_is_stalled_and_reader_settles_later(self):
+        """Exercise requests' real buffered reader, whose close() can wait for a read."""
+        release_server = threading.Event()
+        reading = threading.Event()
+        closing = threading.Event()
+        duplicate_close = threading.Event()
+        close_calls = []
+        receipts, outcome = [], {}
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers['Content-Length']))
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.send_header('Connection', 'close')
+                self.end_headers()
+                self.wfile.flush()
+                release_server.wait(10)  # headers arrive, but the body never does
+
+            def log_message(self, *args):
+                pass
+
+        class ObservedSession(requests.Session):
+            def post(self, *args, **kwargs):
+                response = super().post(*args, **kwargs)
+                original_read = response.raw._fp.fp.raw.readinto
+                original_close = response.close
+
+                def readinto(buffer):
+                    reading.set()
+                    return original_read(buffer)
+
+                response.raw._fp.fp.raw.readinto = readinto
+
+                def close():
+                    close_calls.append(True)
+                    if len(close_calls) > 1:
+                        duplicate_close.set()
+                    closing.set()
+                    original_close()
+
+                response.close = close
+                return response
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        serving = threading.Thread(target=server.serve_forever, daemon=True)
+        serving.start()
+        session = ObservedSession()
+        session.trust_env = False
+        client = OpenRouterClient(session, 'fake-not-a-key', lambda request: 'stalled-http',
+                                  lambda handle, receipt: receipts.append(receipt), timeout=(2, 8))
+        client.chat_url = f'http://127.0.0.1:{server.server_port}/chat/completions'
+        from f_openrouter import load_catalog, role_config
+        config = role_config(load_catalog(ROOT / 'config' / 'openrouter_models.json'),
+                             'deepseek/deepseek-v4-flash-0731', 'deep')
+
+        def read():
+            try:
+                list(client.stream(config, [{'role': 'user', 'content': 'Hi'}]))
+            except Exception as error:
+                outcome['error'] = error
+
+        reader = threading.Thread(target=read, daemon=True)
+        aborter = threading.Thread(target=lambda: outcome.update(stopped=abort_streams()), daemon=True)
+        try:
+            reader.start()
+            self.assertTrue(reading.wait(3), outcome)
+            aborter.start()
+            aborter.join(1)
+            self.assertFalse(aborter.is_alive(), 'abort blocked behind the HTTP body read')
+            self.assertEqual(outcome['stopped'], 1)
+            self.assertTrue(closing.wait(1))
+            for _ in range(5):
+                self.assertEqual(abort_streams(), 1)
+            self.assertFalse(duplicate_close.wait(0.1), 'repeated aborts queued duplicate closers')
+            self.assertEqual(receipts, [], 'only the reader may settle a still-active request')
+            # A buffered Windows read may remain in flight until data or its timeout arrives.
+            # The control request has returned; only the reader may settle its request receipt.
+            release_server.set()
+            reader.join(2)
+            self.assertFalse(reader.is_alive())
+            self.assertIn('error', outcome)
+            self.assertEqual(len(receipts), 1)
+            self.assertEqual(abort_streams(), 0)
+        finally:
+            release_server.set()
+            reader.join(10)
+            if aborter.ident is not None:
+                aborter.join(10)
+            session.close()
+            server.shutdown()
+            server.server_close()
+            serving.join(2)
+
     def test_stop_work_closes_a_hung_stream_and_its_request_is_settled(self):
         receipts = []
         stream = HungStream()

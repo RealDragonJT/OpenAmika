@@ -930,14 +930,15 @@ depends on it, and it adds no feature of its own: same page, same dialog socket,
   `Stop_OpenAmika.ps1`'s script paths). `pet.py` alone opens it for an OpenAmika that already runs (`--url` for
   another address, `--debug` for WebView2's developer tools); exit 1 when `<url>/health` does not answer, 2 without
   pywebview, WebView2 or Windows.
-- **From the Use page** (the **Desktop pet** button in the stage's top bar; `speech/pet_window.py`, loaded by
+- **From the Use page** (**Desktop pet** in the stage's top-right expand menu; `speech/pet_window.py`, loaded by
   `speech/api.py`): her window opens on the desktop of the PC she runs on, so the button shows only when `GET
   /api/pet` answers `supported` (Windows) and `local`: a loopback client, no forwarding header (`X-Forwarded-For`,
   `Forwarded`, `X-Real-IP`, `Tailscale-User-Login`, …) and a `Host` of `localhost`, `127.0.0.1` or `::1`. The answer
   also has `running`, `installed` (pywebview in the window's Python: `AMIKA_PET_PYTHON`, which the launcher sets to
   its own Python, else `brain_python`, else `envs\brain\Scripts\python.exe`) and `session` (`"pet"`, `"page"` or
   null: who holds the dialog session). `POST /api/pet/open` (`X-Build-F-Action: open-pet`, body `{"power": bool,
-  "mic": bool}`), `/api/pet/close` (`close-pet`) and `/api/pet/install` (`install-pet`: pip installs
+  "mic": bool, "voice_output": bool, "audio": {"mic": "device label or empty for default", "speaker": "device label or empty for default"}}`),
+  `/api/pet/close` (`close-pet`) and `/api/pet/install` (`install-pet`: pip installs
   `brain\requirements-pet.txt` into that Python, output in `logs/pet-install.log`) have the same origin and action
   guards as the other controls plus the local rule (403 `Her desktop window can only be opened from this PC
   itself.`). A failure that the page shows is a 200 with `{"ok": false, "code", "reason"}`: `busy`, `unsupported`,
@@ -948,9 +949,19 @@ depends on it, and it adds no feature of its own: same page, same dialog socket,
     event while its window lives (`Local\OpenAmika-pet-<16 hex digits of the SHA-1 of the install folder>`): the
     event exists = her window is open; setting it closes the window (that is `close`, the tab's **Bring her back
     here**). A second event, `<name>-ready`, appears when her page in the window has called
-    `window.pywebview.api.handover()`, which answers `{power, mic}` once; the page then connects with
-    `/ws/dialog?pet=1` and starts the microphone. `open` answers when that event is there, or after 25 s when the
-    window at least exists; otherwise the process is stopped and the answer names `logs/pet.log`. `--close-with`
+    `window.pywebview.api.handover()`, which answers `{power, mic, voice_output?, audio?}`. Power, microphone and
+    audio selection transfer once; the voice-output choice also survives a native page reload. A muted web page
+    first asks to enable spoken replies. Cancel keeps its media and draft untouched; acceptance passes
+    `voice_output: true` through `--voice-output` before the pet connects. Only a successful move updates the web
+    toggle, so a failure restores the muted session and a successful return retains the accepted choice.
+    Audio labels travel through the
+    child's `AMIKA_PET_AUDIO` environment variable; IDs are profile-specific. WebView2 grants host microphone
+    permission without capture so device enumeration works even with the mic off. The page requires a unique
+    label match, applies its own input/output IDs, and calls `handover_done()` after routing succeeds. Missing or
+    ambiguous devices, failed output routing, or failed mic capture close the window and restore the browser
+    session; a requested mic never silently falls back during the move. `open` waits up to 25 s for this
+    acknowledgement. Without an audio transfer, a window that at least exists still counts as open after 25 s.
+    Otherwise the process is stopped and the answer names `logs/pet.log`. `--close-with`
     closes the window when the gateway's process ends, so a stopped OpenAmika leaves no window behind.
   - *While she is out*: the tab shows "Amika is on your desktop" (`.stage-area.pet-away`: its render loop is paused
     with `avatar.setPaused`, the camera is stopped, the top bar is hidden) and asks `GET /api/pet` every 2.5 s, since

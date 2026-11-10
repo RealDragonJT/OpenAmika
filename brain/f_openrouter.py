@@ -116,22 +116,31 @@ def describe_error(exc):
     return None
 
 
-# The model streams this process is reading right now (turns and reflections; a drain is not one of them), so that
-# Unlock and the forced wipe can stop her at once: a read blocked on a hung model (an Ollama that crashed mid-answer
-# waits out its 600 s read timeout) ends when its response is closed, and the request settles as usual.
+# The model streams this process is reading right now (turns and reflections; a drain is not one of them).
+# Unlock and forced wipe request closure without waiting for a hung model's read timeout on the control handler.
 _STREAMS: dict = {}
 _STREAMS_LOCK = threading.Lock()
+_ABORTING_STREAMS: set = set()
+
+
+def _abort_response(response):
+    # requests.Response.close() can itself wait for a buffered reader's lock until the socket read ends.
+    # Keep that wait off the control handler; the reader remains responsible for settling its receipt.
+    with contextlib.suppress(Exception):
+        response.close()
 
 
 def abort_streams() -> int:
-    """Close every model stream being read (see _STREAMS). Their readers raise, settle their receipts and end their
-    turn as cancelled when its cancel flag is set. Returns how many were closed."""
+    """Request an abort of every active stream without waiting on transport I/O. Readers settle their own receipts.
+    Returns the number of active streams, including any already being aborted."""
     with _STREAMS_LOCK:
-        responses = list(_STREAMS.values())
+        count = len(_STREAMS)
+        responses = [response for handle, response in _STREAMS.items() if handle not in _ABORTING_STREAMS]
+        # Repeated Unlock / forced-wipe requests must not spawn more closers for the same hung reader.
+        _ABORTING_STREAMS.update(_STREAMS)
     for response in responses:
-        with contextlib.suppress(Exception):
-            response.close()
-    return len(responses)
+        threading.Thread(target=_abort_response, args=(response,), daemon=True, name="model-stream-abort").start()
+    return count
 
 
 def _number(value, name, *, positive=False):
@@ -594,6 +603,7 @@ class OpenRouterClient:
         finally:
             with _STREAMS_LOCK:
                 _STREAMS.pop(handle, None)
+                _ABORTING_STREAMS.discard(handle)
             if cancelled and error is None and lines is not None and drainer is not None:
                 # The request is in flight and billed either way; finishing it is
                 # cheaper (cached prompt) and records exact usage. Never blocks here.

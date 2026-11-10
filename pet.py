@@ -335,12 +335,19 @@ class PetApi:
     """What her page may ask of its window (window.pywebview.api in ui/use.js): zoom, full_page, close, handover.
     pywebview exposes the public methods only; the window and its handle are filled in when it exists."""
 
-    def __init__(self, base: str, power: bool = False, mic: bool = False, on_ready=None):
+    def __init__(self, base: str, power: bool = False, mic: bool = False, on_ready=None, audio=None, voice_output=None):
         self._base = base
         self._window = None
         self._hwnd = None
         self._open_page = False
         self._handover = {'power': bool(power), 'mic': bool(mic)}
+        if voice_output is not None:
+            self._handover['voice_output'] = voice_output
+        if audio is not None:
+            self._handover['audio'] = audio
+        self._needs_audio = audio is not None
+        self._audio_permission = None
+        self._audio_error = None
         self._on_ready = on_ready
         self._lock = threading.Lock()
 
@@ -348,16 +355,40 @@ class PetApi:
         """What the page that sent her here had on: {'power': bool, 'mic': bool}. Her page in this window asks when
         it is ready and switches the same on. Only the first call gets it: a reload of the page gets both False, so
         she does not come on by herself a second time. The first call also tells main() that her page is alive
-        (on_ready)."""
+        (on_ready). An audio-device transfer waits for handover_done() instead."""
         with self._lock:
             state, self._handover = self._handover, {'power': False, 'mic': False}
+            if 'voice_output' in state:          # a reload must not silently unmute her when power is enabled later
+                self._handover['voice_output'] = state['voice_output']
+        if 'audio' in state:
+            try:
+                if self._audio_permission is not None:
+                    self._audio_permission.GetAwaiter().GetResult()
+            except Exception:
+                self._audio_error = 'The desktop window could not access your audio device list.'
+            if self._audio_error:
+                state['audio_error'] = self._audio_error
+        if not self._needs_audio:
+            self._signal_ready()
+        return state
+
+    def _signal_ready(self):
+        with self._lock:
             on_ready, self._on_ready = self._on_ready, None
         if on_ready is not None:
             try:
                 on_ready()
             except Exception as error:
                 print(f'pet: {type(error).__name__}: {error}', file=sys.stderr)
-        return state
+
+    def handover_done(self, error=None):
+        """A device handoff is ready only after the page selects its audio devices; failures return to the browser."""
+        if error:
+            print('pet: ' + str(error)[:500], file=sys.stderr, flush=True)
+            self.close()
+            return
+        self._needs_audio = False
+        self._signal_ready()
 
     def zoom(self, factor):
         """Make the window bigger or smaller around her feet, within her screen's work area."""
@@ -419,6 +450,14 @@ def prepare(window, api: PetApi, base: str, size: tuple) -> None:
     def on_ready(sender, args):
         if args.IsSuccess:
             sender.CoreWebView2.PermissionRequested += on_permission
+            if any(api._handover.get('audio', {}).values()):
+                # Grant the same host-only microphone permission without opening a capture stream. Chromium then
+                # exposes device labels, including outputs, even when the handed-over microphone is switched off.
+                try:
+                    api._audio_permission = sender.CoreWebView2.Profile.SetPermissionStateAsync(
+                        CoreWebView2PermissionKind.Microphone, base, CoreWebView2PermissionState.Allow)
+                except Exception:
+                    api._audio_error = 'The desktop window could not access your audio device list.'
 
     form.webview.CoreWebView2InitializationCompleted += on_ready
 
@@ -429,6 +468,8 @@ def main(argv=None) -> int:
     ap.add_argument('--debug', action='store_true', help="pywebview's debug mode: developer tools, context menu")
     ap.add_argument('--power', action='store_true', help='she was on in the page that sent her here: switch her on')
     ap.add_argument('--mic', action='store_true', help='the microphone was on there too: switch it on as well')
+    ap.add_argument('--voice-output', action=argparse.BooleanOptionalAction, default=None,
+                    help='preserve whether spoken replies were enabled in the page')
     ap.add_argument('--close-with', type=int, metavar='PID', help='close the window when this process ends')
     args = ap.parse_args(argv)
     if os.name != 'nt':
@@ -459,7 +500,14 @@ def main(argv=None) -> int:
     handles, closing = [held], threading.Event()
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     geo = placed(load_geometry(GEOMETRY))
-    api = PetApi(base, power=args.power, mic=args.mic, on_ready=lambda: handles.append(page_alive(name)))
+    try:
+        audio = json.loads(os.environ.get('AMIKA_PET_AUDIO', 'null'))
+    except ValueError:
+        print('Invalid desktop audio selections.', file=sys.stderr)
+        release(handles)
+        return 2
+    api = PetApi(base, power=args.power, mic=args.mic, audio=audio, voice_output=args.voice_output,
+                 on_ready=lambda: handles.append(page_alive(name)))
     window = webview.create_window(TITLE, pet_url(base), js_api=api, x=geo['x'], y=geo['y'], width=geo['width'],
                                    height=geo['height'], frameless=True, transparent=True, on_top=True, easy_drag=False,
                                    shadow=False, min_size=MIN_SIZE, background_color='#000000', text_select=False,

@@ -1,0 +1,903 @@
+const { test, before, after } = require('node:test');
+const assert = require('node:assert/strict');
+const { chromium } = require('playwright');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const root = path.resolve(__dirname, '../..');
+let browser;
+before(async () => {
+  browser = await chromium.launch({ args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
+});
+after(async () => { await browser?.close(); });
+
+// Serve the real UI through routing: no server, models, account, or running stack.
+// Media uses Chromium's synthetic devices. API responses and dialog sockets are fixtures.
+async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFactor = 1, readyAvatar = false, options = {}) {
+  const context = await browser.newContext({ viewport, deviceScaleFactor, permissions: ['camera', 'microphone'] });
+  t.after(() => context.close());
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  t.after(() => assert.deepEqual(errors, [], 'no browser script errors'));
+  await page.route('**/*', async route => {
+    const url = new URL(route.request().url());
+    const p = url.pathname;
+    if (url.hostname !== 'localhost') return route.fulfill({ body: '', contentType: 'text/css' });
+    if (p === '/use' || p.startsWith('/ui/')) {
+      const f = path.join(root, p === '/use' ? 'ui/use.html' : p.slice(1));
+      const contentType = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.webp': 'image/webp' }[path.extname(f)];
+      if ((readyAvatar || options.pendingAvatar) && p === '/ui/live2d-engine.js') {
+        // Simulate a loaded model and observe the busy-display API without licensed model assets.
+        const body = await fs.readFile(f, 'utf8') + `
+          OpenAmikaAvatar.init = async options => {
+            fixture.avatarOptions = options;
+            ${options.pendingAvatar ? 'return new Promise((resolve, reject) => { fixture.completeAvatar = resolve; fixture.failAvatar = reject; });' : 'return { ok: true };'}
+          };
+          fixture.busyHistory = [];
+          OpenAmikaAvatar.setBusy = on => { fixture.busy = on; fixture.busyHistory.push(on); };
+          const flush = OpenAmikaAvatar.flush;
+          fixture.flushCount = 0;
+          OpenAmikaAvatar.flush = () => { fixture.flushCount++; flush(); };
+          const pause = OpenAmikaAvatar.setPaused;
+          OpenAmikaAvatar.setPaused = on => { fixture.paused = on; pause(on); };
+        `;
+        return route.fulfill({ body, contentType });
+      }
+      return route.fulfill({ body: await fs.readFile(f), contentType });
+    }
+    const fixtures = {
+      '/api/build_f/persona': { onboarded: true },
+      '/api/stage': { blur: 12, background: null },
+      '/api/avatar/models': { models: [], emotions: [] },
+      '/api/vision': { enabled: true },
+      '/api/pet': options.petInfo || { supported: true, local: false },
+    };
+    return route.fulfill({ json: fixtures[p] || {} });
+  });
+  await page.addInitScript(({ host, handover, mediaDevices, savedDevices, outputFailure, inputFailure }) => {
+    window.fixture = { sockets: [], streams: [], requests: [], pending: [], holdMedia: false, denyMedia: false };
+    for (const [kind, id] of Object.entries(savedDevices || {})) localStorage.setItem('openamika-' + kind + 'Device', id);
+    if (mediaDevices) {
+      navigator.mediaDevices.enumerateDevices = async () => mediaDevices;
+      fixture.sinks = [];
+      const setSink = AudioContext.prototype.setSinkId;
+      AudioContext.prototype.setSinkId = function(id) {
+        fixture.sinks.push(id);
+        if (id && outputFailure) return Promise.reject(new DOMException('Test output refusal', 'NotAllowedError'));
+        return setSink.call(this, '');
+      };
+    }
+    if (host) {
+      fixture.hostCalls = [];
+      window.pywebview = { api: Object.fromEntries(['zoom', 'full_page', 'close'].map(name =>
+        [name, (...args) => { fixture.hostCalls.push([name, ...args]); return Promise.resolve(); }])) };
+      if (handover) window.pywebview.api.handover = async () => {
+        fixture.hostCalls.push(['handover']);
+        const state = handover; handover = null; return state;
+      };
+      window.pywebview.api.handover_done = async error => fixture.hostCalls.push(['handover_done', error || null]);
+    }
+    window.WebSocket = class {
+      constructor(url) {
+        this.url = url; this.readyState = 0; this.bufferedAmount = 0; this.sent = [];
+        fixture.sockets.push(this);
+        setTimeout(() => { if (this.readyState === 0) { this.readyState = 1; this.onopen?.({}); } }, 0);
+      }
+      send(data) { this.sent.push(data); }
+      close() { this.readyState = 3; setTimeout(() => this.onclose?.({}), 40); }
+    };
+    const get = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async constraints => {
+      fixture.requests.push(constraints);
+      if (fixture.holdMedia) await new Promise(resolve => fixture.pending.push(resolve));
+      if (fixture.denyMedia) throw new DOMException('Test permission refusal', 'NotAllowedError');
+      if (inputFailure && constraints.audio?.deviceId?.exact) throw new DOMException('Test disconnected input', 'OverconstrainedError');
+      let actual = constraints;
+      if (mediaDevices?.some(d => d.kind === 'audioinput' && d.deviceId === constraints.audio?.deviceId?.exact)) {
+        actual = { ...constraints, audio: { ...constraints.audio } }; delete actual.audio.deviceId;
+      }
+      const stream = await get(actual);
+      fixture.streams.push(stream);
+      return stream;
+    };
+  }, { host: !!options.host, handover: options.handover, mediaDevices: options.mediaDevices,
+    savedDevices: options.savedDevices, outputFailure: options.outputFailure, inputFailure: options.inputFailure });
+  await page.goto('http://localhost:53999/use?' + (options.pet ? 'pet=1' : 'kiosk=1'));
+  await page.waitForFunction(({ ready, pending }) => window.OA && window.OpenAmikaAvatar &&
+    (pending ? !!fixture.avatarOptions : ready ? Array.isArray(fixture.busyHistory) && fixture.busyHistory.length
+      : !document.querySelector('#stageEmpty').hidden), { ready: readyAvatar, pending: !!options.pendingAvatar });
+  return page;
+}
+const pressed = (page, id, value) => page.waitForFunction(([id, value]) => document.getElementById(id).getAttribute('aria-pressed') === String(value), [id, value]);
+const noTracks = page => page.waitForFunction(() => fixture.streams.every(s => s.getTracks().every(t => t.readyState === 'ended')));
+
+async function engineFunctions(names, bindings = {}) {
+  const source = (await fs.readFile(path.join(root, 'ui/live2d-engine.js'), 'utf8')).replace(/\r\n/g, '\n');
+  const helpers = source.includes('function assetFilename(') ? ['assetFilename'] : [];
+  const pieces = [...helpers, ...names].map(name => {
+    let start = source.indexOf('function ' + name + '(');
+    assert.ok(start >= 0, name + ' exists');
+    if (source.slice(start - 6, start) === 'async ') start -= 6;
+    const end = source.indexOf('\n  }\n', start);
+    assert.ok(end > start, name + ' body exists');
+    return source.slice(start, end + 5);
+  });
+  return new Function(...Object.keys(bindings), pieces.join('\n') + '; return {' + names.join(',') + '};')(...Object.values(bindings));
+}
+
+test('versioned motion URLs stay intact without duplicating existing motions', async () => {
+  const entries = [
+    { type: 'motion', file: 'idle.motion3.json', path: '/avatar_models/Model/idle.motion3.json?v=one' },
+    { type: 'motion', file: 'new.motion3.json', path: '/avatar_models/Model/sub/new.motion3.json?v=two' },
+    { type: 'expression', file: 'smile.exp3.json', path: '/avatar_models/Model/smile.exp3.json?v=three' },
+  ];
+  const { injectExternalMotions: inject } = await engineFunctions(['injectExternalMotions'], {
+    fetch: async () => ({ json: async () => entries }),
+  });
+  const manager = { definitions: { Idle: [{ File: 'idle.motion3.json?v=one' }] } };
+  await inject(manager, { motions_url: '/registry' });
+  await inject(manager, { motions_url: '/registry' });
+  assert.deepEqual(manager.definitions.Idle.map(m => m.File), [
+    'idle.motion3.json?v=one', '/avatar_models/Model/sub/new.motion3.json?v=two',
+  ]);
+});
+
+test('agent idle and state motions match versioned URLs without changing the download URL', async () => {
+  for (const [name, file] of [
+    ['idle1', 'idle1.motion3.json'],
+    ['idle1', 'motions/idle1.motion3.json?v=content'],
+    ['think1', '/avatar_models/Host/think1.motion3.json?v=content#motion'],
+    ['talk one', '/avatar_models/Host/talk%20one.motion3.json?v=content'],
+  ]) {
+    const calls = [];
+    const definitions = { Idle: [{ File: 'other.motion3.json' }, { File: file }] };
+    const agent = { model: { internalModel: { motionManager: { definitions } }, motion: (...args) => calls.push(args) } };
+    const { agentPlay } = await engineFunctions(['agentPlay'], { agent });
+    assert.equal(agentPlay(name), true, file);
+    assert.deepEqual(calls, [['Idle', 1, 3]]);
+    assert.equal(agent.lastMotion, name);
+    assert.equal(definitions.Idle[1].File, file, 'keep cache version for the actual request');
+    assert.equal(agentPlay('missing'), false);
+  }
+});
+
+test('versioned expressions use the expression manager and retain the missing-definition fallback', async () => {
+  for (const file of ['smile.exp3.json', 'expressions/smile.exp3.json?v=content',
+    '/avatar_models/Amika/smile.exp3.json?v=content#expression']) {
+    const managed = [], fallback = [], activeExpressions = new Set();
+    const asset = { name: 'smile', file: 'smile.exp3.json', path: '/avatar_models/Amika/smile.exp3.json?v=content' };
+    const definitions = [{ Name: 'smile', File: file }];
+    const live2dModel = { internalModel: { motionManager: { expressionManager: {
+      definitions, setExpression: index => managed.push(index),
+    } } } };
+    const { activateExpressionByName } = await engineFunctions(['activateExpressionByName'], {
+      expressionAssets: [asset], activeExpressions, live2dModel,
+      applyExpressionFromPath: (...args) => fallback.push(args),
+    });
+    activateExpressionByName('smile');
+    activateExpressionByName('smile');
+    assert.deepEqual(managed, [0], file + ' uses library fading/blending once');
+    assert.deepEqual(fallback, []);
+    assert.equal(definitions[0].File, file);
+    activeExpressions.clear(); definitions.length = 0;
+    activateExpressionByName('smile');
+    assert.deepEqual(fallback, [[asset.path, asset.file]], 'unknown definitions still use the original fallback URL');
+  }
+});
+
+test('avatar loading shows each stage without blocking controls or shifting the layout', async t => {
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 412, height: 915 }]) {
+    const p = await open(t, viewport, 1, false, { pendingAvatar: true });
+    const loading = p.locator('#avatarLoading');
+    assert.equal(await loading.isVisible(), true);
+    assert.equal(await p.locator('#avatarLoadingText').textContent(), 'Loading avatar…');
+    const before = await p.locator('#stageArea').boundingBox();
+    await p.locator('#sayInput').fill('Keep this while she loads');
+    await p.locator('#lockBtn').click();
+    await pressed(p, 'lockBtn', true);
+    await p.evaluate(() => fixture.avatarOptions.onProgress(40));
+    assert.equal(await p.locator('#avatarLoadingText').textContent(), 'Downloading avatar…');
+    await p.evaluate(() => fixture.avatarOptions.onProgress(90));
+    assert.equal(await p.locator('#avatarLoadingText').textContent(), 'Preparing avatar…');
+    await p.emulateMedia({ reducedMotion: 'reduce' });
+    assert.equal(await p.locator('.u-avatar-spinner').evaluate(e => getComputedStyle(e).animationName), 'none');
+    await p.evaluate(() => fixture.completeAvatar({ ok: true }));
+    await loading.waitFor({ state: 'hidden' });
+    assert.deepEqual(await p.locator('#stageArea').boundingBox(), before);
+    assert.equal(await p.locator('#sayInput').inputValue(), 'Keep this while she loads');
+    assert.equal(await p.locator('#stageEmpty').isHidden(), true);
+  }
+});
+
+test('avatar loading ends for missing models, failed requests and rejected initialization', async t => {
+  const empty = await open(t);
+  assert.equal(await empty.locator('#avatarLoading').isHidden(), true);
+  assert.equal(await empty.locator('#stageEmpty .big').textContent(), 'No Live2D model yet');
+  for (const failure of ['registry', 'load-failed', 'rejection']) {
+    const p = await open(t, undefined, 1, false, { pendingAvatar: true });
+    await p.evaluate(reason => reason === 'rejection' ? fixture.failAvatar(new Error('fixture startup failure'))
+      : fixture.completeAvatar({ ok: false, reason }), failure);
+    await p.locator('#avatarLoading').waitFor({ state: 'hidden' });
+    assert.equal(await p.locator('#stageEmpty .big').textContent(), "Avatar couldn't load");
+    assert.equal(await p.locator('#stageEmpty').isVisible(), true);
+  }
+});
+
+const localPet = { supported: true, local: true, installed: true, running: false };
+
+test('muted handoff asks first, restores mute on failure, then enables approved spoken replies', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: localPet });
+  await p.locator('#t-set').click(); await p.locator('#voiceOutToggle').uncheck();
+  let success = false, payload, calls = 0;
+  await p.route('**/api/pet/open', route => {
+    calls++;
+    payload = route.request().postDataJSON();
+    return route.fulfill({ json: { ok: success, reason: 'Window failed' } });
+  });
+  await p.route('**/api/pet/close', route => route.fulfill({ json: { ok: true, had_session: true } }));
+  await p.locator('#powerBtn').click(); await pressed(p, 'powerBtn', true);
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petVoice').waitFor({ state: 'visible' });
+  assert.equal(calls, 0);
+  await pressed(p, 'powerBtn', true);
+  await p.locator('#petVoiceYes').click();
+  await p.waitForFunction(() => fixture.sockets.filter(s => s.url.includes('/ws/dialog')).length === 2 && !petBtn.disabled);
+  assert.equal(payload.voice_output, true, 'spoken replies are enabled only after acceptance');
+  assert.equal(await p.locator('#voiceOutToggle').isChecked(), false);
+  await p.waitForFunction(() => fixture.sockets.filter(s => s.url.includes('/ws/dialog')).at(-1).sent.length);
+  assert.equal(await p.evaluate(() => JSON.parse(fixture.sockets.filter(s => s.url.includes('/ws/dialog')).at(-1).sent[0]).voice_output), false);
+  success = true;
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petVoice').waitFor({ state: 'visible' });
+  await p.locator('#petVoiceYes').click();
+  await p.locator('#petAway').waitFor({ state: 'visible' });
+  assert.equal(calls, 2);
+  assert.equal(await p.locator('#voiceOutToggle').isChecked(), true);
+  const pet = await open(t, undefined, 1, true, { pet: true, host: true, handover: payload });
+  await pet.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'handover_done'));
+  await pressed(pet, 'powerBtn', true);
+  await pet.locator('#powerBtn').click(); await pressed(pet, 'powerBtn', false);
+  await pet.locator('#powerBtn').click(); await pressed(pet, 'powerBtn', true);
+  await p.locator('#petBackBtn').click(); await p.locator('#petAway').waitFor({ state: 'hidden' });
+  await pressed(p, 'powerBtn', true);
+  for (const page of [p, pet]) {
+    await page.waitForFunction(() => fixture.sockets.filter(s => s.url.includes('/ws/dialog')).at(-1).sent.length);
+    const settings = await page.evaluate(() => fixture.sockets.filter(s => s.url.includes('/ws/dialog'))
+      .flatMap(s => s.sent.filter(v => typeof v === 'string').map(JSON.parse)).filter(v => v.type === 'settings'));
+    assert.ok(settings.length >= 2);
+    assert.equal(settings.at(-1).voice_output, true, 'the accepted choice survives reconnect and return');
+    if (page === pet) assert.ok(settings.every(s => s.voice_output === true));
+  }
+});
+
+test('cancel, Escape and outside dismissal leave muted web media and draft untouched', async t => {
+  for (const width of [1440, 412]) {
+    const p = await open(t, { width, height: 915 }, 1, true, { petInfo: localPet });
+    await p.locator('#t-set').click(); await p.locator('#voiceOutToggle').uncheck();
+    let calls = 0;
+    await p.route('**/api/pet/open', route => { calls++; return route.fulfill({ json: { ok: true } }); });
+    await p.locator('#powerBtn').click(); await pressed(p, 'powerBtn', true);
+    await p.locator('#micBtn').click(); await pressed(p, 'micBtn', true);
+    await p.locator('#camBtn').click(); await pressed(p, 'camBtn', true);
+    await p.locator('#sayInput').fill('Keep this draft');
+    for (const dismiss of ['cancel', 'escape', 'outside']) {
+      await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+      await p.locator('#petVoice').waitFor({ state: 'visible' });
+      assert.equal(await p.locator('#petVoiceNo').evaluate(el => el === document.activeElement), true);
+      const box = await p.locator('#petVoice').boundingBox();
+      assert.ok(box.x >= 0 && box.x + box.width <= width, 'prompt fits the viewport');
+      if (dismiss === 'cancel') await p.locator('#petVoiceNo').click();
+      else if (dismiss === 'escape') await p.keyboard.press('Escape');
+      else await p.locator('#stageArea').click({ position: { x: 20, y: 300 } });
+      await p.locator('#petVoice').waitFor({ state: 'hidden' });
+      if (dismiss !== 'outside') assert.equal(await p.locator('#fsBtn').evaluate(el => el === document.activeElement), true);
+      assert.equal(await p.locator('#petVoice').evaluate(el => el.contains(document.activeElement)), false);
+      assert.equal(await p.locator('#voiceOutToggle').isChecked(), false);
+      assert.equal(await p.locator('#sayInput').inputValue(), 'Keep this draft');
+      await pressed(p, 'powerBtn', true); await pressed(p, 'micBtn', true); await pressed(p, 'camBtn', true);
+      assert.equal(await p.evaluate(() => fixture.streams.every(s => s.getTracks().every(t => t.readyState === 'live'))), true);
+      assert.equal(calls, 0);
+    }
+    assert.equal(await p.evaluate(() => fixture.sockets.filter(s => s.url.includes('/ws/dialog')).length), 1);
+  }
+});
+
+test('muted handoff asks after installation and ignores repeated confirmation during opening', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: { ...localPet, installed: false } });
+  await p.locator('#t-set').click(); await p.locator('#voiceOutToggle').uncheck();
+  await p.route('**/api/pet/install', route => route.fulfill({ json: { ok: true } }));
+  let calls = 0, finish;
+  await p.route('**/api/pet/open', async route => {
+    calls++; await new Promise(resolve => { finish = resolve; });
+    await route.fulfill({ json: { ok: true } });
+  });
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petInstallBtn').click();
+  await p.locator('#petVoice').waitFor({ state: 'visible' });
+  assert.equal(calls, 0);
+  await p.keyboard.press('Shift+Tab');
+  assert.equal(await p.locator('#petVoiceYes').evaluate(el => el === document.activeElement), true);
+  await p.keyboard.press('Enter');
+  await p.waitForFunction(() => petVoiceYes.disabled);
+  await p.locator('#petVoiceYes').evaluate(el => el.click());
+  await p.waitForFunction(() => powerDetail.textContent.includes('opening'));
+  assert.equal(calls, 1);
+  finish();
+  await p.locator('#petAway').waitFor({ state: 'visible' });
+  assert.equal(await p.locator('#voiceOutToggle').isChecked(), true);
+});
+
+test('idle native handoff retains voice-output choice until power is switched on', async t => {
+  for (const voice_output of [false, true]) {
+    const p = await open(t, undefined, 1, true, { pet: true, host: true,
+      handover: { power: false, mic: false, voice_output, audio: { mic: '', speaker: '' } } });
+    await p.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'handover_done'));
+    assert.equal(await p.locator('#voiceOutToggle').isChecked(), voice_output);
+    await p.locator('#powerBtn').click(); await pressed(p, 'powerBtn', true);
+    await p.waitForFunction(() => fixture.sockets.find(s => s.url.includes('/ws/dialog'))?.sent.length);
+    const first = await p.evaluate(() => JSON.parse(fixture.sockets.find(s => s.url.includes('/ws/dialog')).sent[0]));
+    assert.deepEqual(first, { type: 'settings', voice_output });
+  }
+});
+
+test('desktop pet handoff releases media, retains draft, and returns to the browser', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: localPet });
+  await p.route('**/api/pet/open', async route => {
+    assert.deepEqual(route.request().postDataJSON(), { power: true, mic: true, voice_output: true, audio: { mic: '', speaker: '' } });
+    assert.equal(route.request().headers()['x-build-f-action'], 'open-pet');
+    await route.fulfill({ json: { ok: true } });
+  });
+  await p.route('**/api/pet/close', route => route.fulfill({ json: { ok: true, had_session: true } }));
+  await p.locator('#powerBtn').click(); await pressed(p, 'powerBtn', true);
+  await p.locator('#micBtn').click(); await pressed(p, 'micBtn', true);
+  await p.locator('#camBtn').click(); await pressed(p, 'camBtn', true);
+  await p.locator('#sayInput').fill('Keep my draft');
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petAway').waitFor({ state: 'visible' });
+  await noTracks(p);
+  assert.equal(await p.evaluate(() => fixture.paused), true);
+  assert.equal(await p.locator('#petBackBtn').evaluate(e => e === document.activeElement), true);
+  const count = await p.evaluate(() => fixture.requests.length);
+  await p.keyboard.press('m'); await p.keyboard.press('c');
+  assert.equal(await p.evaluate(() => fixture.requests.length), count);
+  await p.locator('#petBackBtn').click();
+  await p.locator('#petAway').waitFor({ state: 'hidden' });
+  await pressed(p, 'powerBtn', true);
+  assert.equal(await p.evaluate(() => fixture.paused), false);
+  assert.equal(await p.locator('#sayInput').inputValue(), 'Keep my draft');
+  assert.equal(await p.locator('#fsBtn').evaluate(e => e === document.activeElement), true);
+});
+
+test('failed desktop handoff restores the session and mic without losing the draft', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: localPet });
+  await p.route('**/api/pet/open', route => route.fulfill({ json: { ok: false, reason: 'Window failed' } }));
+  await p.locator('#powerBtn').click(); await pressed(p, 'powerBtn', true);
+  await p.locator('#micBtn').click(); await pressed(p, 'micBtn', true);
+  await p.locator('#sayInput').fill('Retry this');
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.waitForFunction(() => fixture.sockets.filter(s => s.url.includes('/ws/dialog')).length === 2);
+  await pressed(p, 'micBtn', true); await pressed(p, 'powerBtn', true);
+  assert.equal(await p.locator('#petAway').isHidden(), true);
+  assert.equal(await p.locator('#sayInput').inputValue(), 'Retry this');
+  await p.locator('#powerBtn').click(); await noTracks(p);
+});
+
+test('returning from the pet retries failures and notices when its native window closes', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: { ...localPet, running: true } });
+  await p.locator('#petAway').waitFor({ state: 'visible' });
+  let attempts = 0;
+  await p.route('**/api/pet/close', route => route.fulfill({ json: ++attempts === 1
+    ? { ok: false, reason: 'Window could not close' } : { ok: true, had_session: false } }));
+  await p.locator('#petBackBtn').click();
+  await p.waitForFunction(() => !petBackBtn.disabled);
+  assert.equal(await p.locator('#petAway').isVisible(), true);
+  assert.equal(await p.evaluate(() => fixture.paused), true);
+  await p.locator('#petBackBtn').click();
+  await p.locator('#petAway').waitFor({ state: 'hidden' });
+  assert.equal(attempts, 2);
+  assert.equal(await p.evaluate(() => fixture.paused), false);
+  await pressed(p, 'powerBtn', false);
+
+  const external = await open(t, undefined, 1, true, { petInfo: { ...localPet, running: true } });
+  await external.locator('#petAway').waitFor({ state: 'visible' });
+  await external.route('**/api/pet', route => route.fulfill({ json: localPet }));
+  await external.locator('#petAway').waitFor({ state: 'hidden' });
+  assert.equal(await external.evaluate(() => fixture.paused), false);
+  assert.equal(await external.locator('#fsBtn').evaluate(e => !e.closest('[inert]')), true);
+  await external.locator('#powerBtn').click(); await pressed(external, 'powerBtn', true);
+});
+
+test('desktop pet setup dismisses and retries; remote pages do not expose host controls', async t => {
+  const remote = await open(t, { width: 412, height: 915 }, 1, true);
+  await remote.locator('#fsBtn').click();
+  assert.equal(await remote.locator('#petBtn').isHidden(), true);
+  const p = await open(t, { width: 412, height: 915 }, 1, true, { petInfo: { ...localPet, installed: false } });
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petSetup').waitFor({ state: 'visible' });
+  assert.equal(await p.locator('#petInstallBtn').evaluate(e => e === document.activeElement), true);
+  await p.keyboard.press('Escape');
+  assert.equal(await p.locator('#petSetup').isHidden(), true);
+  assert.equal(await p.locator('#fsBtn').evaluate(e => e === document.activeElement), true);
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.route('**/api/pet/install', route => route.fulfill({ json: { ok: false, reason: 'Install failed' } }));
+  await p.locator('#petInstallBtn').click();
+  await p.waitForFunction(() => !petInstallBtn.disabled && petInstallBtn.textContent === 'Install and open');
+  assert.equal(await p.locator('#petSetup').isVisible(), true);
+  await p.locator('#petInstallNo').click();
+  assert.equal(await p.locator('#petSetup').isHidden(), true);
+});
+
+test('native pet handover takes over power and microphone once with a pet-owned socket', async t => {
+  const p = await open(t, { width: 320, height: 560 }, 1, true,
+    { pet: true, host: true, handover: { power: true, mic: true } });
+  await pressed(p, 'powerBtn', true); await pressed(p, 'micBtn', true);
+  assert.equal(await p.evaluate(() => fixture.sockets.find(s => s.url.includes('/ws/dialog')).url.endsWith('?pet=1')), true);
+  assert.equal(await p.evaluate(() => fixture.hostCalls.filter(c => c[0] === 'handover').length), 1);
+  await p.locator('#powerBtn').click(); await noTracks(p);
+});
+
+const petAudioDevices = [
+  { kind: 'audioinput', deviceId: 'native-mic', label: 'USB microphone' },
+  { kind: 'audiooutput', deviceId: 'native-speaker', label: 'Headphones' },
+];
+
+test('web handoff sends device names rather than browser-specific IDs', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: localPet,
+    mediaDevices: petAudioDevices.map(d => ({ ...d, deviceId: d.deviceId.replace('native-', 'web-') })),
+    savedDevices: { mic: 'web-mic', speaker: 'web-speaker' } });
+  let received;
+  await p.route('**/api/pet/open', route => { received = route.request().postDataJSON(); return route.fulfill({ json: { ok: true } }); });
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petAway').waitFor({ state: 'visible' });
+  assert.deepEqual(received, { power: false, mic: false, voice_output: true, audio: { mic: 'USB microphone', speaker: 'Headphones' } });
+});
+
+test('native handoff resolves different device IDs before microphone capture and output', async t => {
+  const p = await open(t, undefined, 1, true, { pet: true, host: true, mediaDevices: petAudioDevices,
+    savedDevices: { mic: 'old-native-mic', speaker: 'old-native-speaker' },
+    handover: { power: true, mic: true, audio: { mic: 'USB microphone', speaker: 'Headphones' } } });
+  await p.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'handover_done'));
+  assert.deepEqual(await p.evaluate(() => [OA.devices.get('mic'), OA.devices.get('speaker')]), ['native-mic', 'native-speaker']);
+  assert.equal(await p.evaluate(() => fixture.requests[0].audio.deviceId.exact), 'native-mic');
+  assert.equal(await p.evaluate(() => fixture.sinks.at(-1)), 'native-speaker');
+  assert.deepEqual(await p.evaluate(() => fixture.hostCalls.find(c => c[0] === 'handover_done')), ['handover_done', null]);
+  assert.match(await p.locator('#powerBtn').getAttribute('title'), /Headphones/);
+  await p.locator('#powerBtn').click(); await noTracks(p);
+});
+
+test('audio selection with the microphone off never opens a capture stream', async t => {
+  const p = await open(t, undefined, 1, true, { pet: true, host: true, mediaDevices: petAudioDevices,
+    handover: { power: false, mic: false, audio: { mic: 'USB microphone', speaker: 'Headphones' } } });
+  await p.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'handover_done'));
+  assert.equal(await p.evaluate(() => fixture.requests.length), 0);
+  assert.equal(await p.evaluate(() => fixture.sinks.at(-1)), 'native-speaker');
+  await pressed(p, 'micBtn', false); await pressed(p, 'powerBtn', false);
+});
+
+test('system-default handoff clears stale pet selections', async t => {
+  const p = await open(t, undefined, 1, true, { pet: true, host: true, mediaDevices: petAudioDevices,
+    savedDevices: { mic: 'old-mic', speaker: 'old-speaker' },
+    handover: { power: false, mic: false, audio: { mic: '', speaker: '' } } });
+  await p.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'handover_done'));
+  assert.deepEqual(await p.evaluate(() => [OA.devices.get('mic'), OA.devices.get('speaker')]), ['', '']);
+  assert.equal(await p.evaluate(() => fixture.sinks.at(-1)), '');
+  assert.equal(await p.evaluate(() => fixture.requests.length), 0);
+});
+
+test('missing or ambiguous devices and output failures reject the native handoff', async t => {
+  for (const scenario of ['missing', 'ambiguous', 'output', 'input']) {
+    const p = await open(t, undefined, 1, true, { pet: true, host: true,
+      mediaDevices: scenario === 'missing' ? [] : scenario === 'ambiguous'
+        ? [...petAudioDevices, { ...petAudioDevices[0], deviceId: 'second-mic' }] : petAudioDevices,
+      outputFailure: scenario === 'output', inputFailure: scenario === 'input', savedDevices: { mic: 'previous-mic', speaker: 'previous-speaker' },
+      handover: { power: true, mic: true, audio: { mic: 'USB microphone', speaker: 'Headphones' } } });
+    await p.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'handover_done'));
+    assert.ok(await p.evaluate(() => fixture.hostCalls.find(c => c[0] === 'handover_done')[1]), scenario);
+    assert.equal(await p.evaluate(() => fixture.requests.length), scenario === 'input' ? 1 : 0, scenario + ': no fallback input capture');
+    await noTracks(p);
+    assert.deepEqual(await p.evaluate(() => [OA.devices.get('mic'), OA.devices.get('speaker')]), ['previous-mic', 'previous-speaker']);
+    await pressed(p, 'powerBtn', false);
+  }
+});
+
+test('failed pet opening keeps the webcam on; returning from a successful move leaves it off', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: localPet });
+  let success = false;
+  await p.route('**/api/pet/open', route => route.fulfill({ json: { ok: success, reason: 'Audio device unavailable' } }));
+  await p.route('**/api/pet/close', route => route.fulfill({ json: { ok: true, had_session: false } }));
+  await p.locator('#camBtn').click(); await pressed(p, 'camBtn', true);
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.waitForFunction(() => !petBtn.disabled);
+  await pressed(p, 'camBtn', true);
+  assert.equal(await p.evaluate(() => fixture.streams[0].getVideoTracks()[0].readyState), 'live');
+  success = true;
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petAway').waitFor({ state: 'visible' }); await noTracks(p);
+  await p.locator('#petBackBtn').click(); await p.locator('#petAway').waitFor({ state: 'hidden' });
+  await pressed(p, 'camBtn', false);
+  assert.equal(await p.evaluate(() => fixture.requests.length), 1, 'camera was not reopened on return');
+});
+
+test('scene, expand menu, and transcript dismiss with focus restored; draft text survives', async t => {
+  const p = await open(t);
+  await p.locator('#sceneBtn').click();
+  await p.locator('#bgBlur').focus();
+  await p.keyboard.press('Escape');
+  assert.equal(await p.locator('#scenePanel').isHidden(), true);
+  assert.equal(await p.locator('#sceneBtn').evaluate(e => e === document.activeElement), true);
+  await p.locator('#fsBtn').click();
+  await p.keyboard.press('Escape');
+  assert.equal(await p.locator('#expandMenu').isHidden(), true);
+  await p.locator('#fsBtn').click();
+  await p.locator('[data-mode="window"]').click();
+  await p.locator('#sayInput').fill('Keep this draft');
+  await p.keyboard.press('Escape');
+  assert.equal(await p.locator('#stageArea').evaluate(e => e.classList.contains('u-big')), false);
+  assert.equal(await p.locator('#sayInput').inputValue(), 'Keep this draft');
+  await p.locator('#fsBtn').click();
+  await p.locator('[data-mode="window"]').click();
+  await p.locator('#drawerBtn').click();
+  await p.keyboard.press('Escape');
+  assert.equal(await p.locator('#drawer').isHidden(), true);
+  assert.equal(await p.locator('#drawerBtn').evaluate(e => e === document.activeElement), true);
+});
+
+test('rapid reconnect ignores stale socket callbacks and sends text once', async t => {
+  const p = await open(t);
+  await p.locator('#powerBtn').click();
+  await pressed(p, 'powerBtn', true);
+  await p.waitForFunction(() => fixture.sockets[0].readyState === 1);
+  await p.evaluate(() => { powerBtn.click(); powerBtn.click(); });
+  await p.waitForFunction(() => fixture.sockets[1]?.readyState === 1);
+  await p.evaluate(() => fixture.sockets[0].onclose({}));
+  await p.locator('#sayInput').fill('Hello');
+  assert.equal(await p.locator('#sayBtn').isEnabled(), true);
+  await p.locator('#sayBtn').click();
+  assert.equal(await p.evaluate(() => fixture.sockets[1].sent.filter(s => typeof s === 'string' && JSON.parse(s).type === 'text').length), 1);
+  assert.equal(await p.locator('#sayInput').inputValue(), '');
+  await p.locator('#sayInput').fill('Retain on reconnect');
+  await p.evaluate(() => { fixture.sockets[1].readyState = 3; fixture.sockets[1].onclose({}); });
+  assert.equal(await p.locator('#sayBtn').isDisabled(), true);
+  await p.waitForFunction(() => fixture.sockets[2]?.readyState === 1);
+  assert.equal(await p.locator('#sayInput').inputValue(), 'Retain on reconnect');
+});
+
+test('disconnect clears thinking immediately and cancels its timer without affecting a new socket', async t => {
+  const p = await open(t, undefined, 1, true);
+  await p.clock.install();
+  await p.locator('#powerBtn').click();
+  await p.waitForFunction(() => fixture.sockets[0]?.readyState === 1);
+  const think = socket => p.evaluate(index => fixture.sockets[index].onmessage({
+    data: JSON.stringify({ type: 'ai_surface_done', mode: 'think', surface_tts_done: true }),
+  }), socket);
+  await think(0);
+  assert.equal(await p.evaluate(() => fixture.busy), true, 'waiting for the deep reply shows thinking');
+  await p.locator('#powerBtn').click();
+  assert.equal(await p.evaluate(() => fixture.busy), false, 'Power off clears thinking immediately');
+  assert.equal(await p.locator('#powerState').textContent(), 'Offline');
+  const historyLength = await p.evaluate(() => fixture.busyHistory.length);
+  await p.clock.fastForward(120001);
+  assert.equal(await p.evaluate(() => fixture.busyHistory.length), historyLength, 'the canceled safety timer never fires');
+  assert.equal(await p.evaluate(() => fixture.sockets.length), 1, 'explicit disconnect does not reconnect');
+  await p.locator('#powerBtn').click();
+  await p.waitForFunction(() => fixture.sockets[1]?.readyState === 1);
+  await think(1);
+  await p.evaluate(() => fixture.sockets[0].onclose({}));
+  assert.equal(await p.evaluate(() => fixture.busy), true, 'old close cannot clear thinking on the new connection');
+  await p.evaluate(() => fixture.sockets[1].onmessage({ data: JSON.stringify({ type: 'ai_deep_done' }) }));
+  assert.equal(await p.evaluate(() => fixture.busy), false, 'the new reply clears its own thinking state');
+});
+
+test('camera off cancels a pending permission request and stops its late stream', async t => {
+  const p = await open(t);
+  await p.evaluate(() => { fixture.holdMedia = true; });
+  await p.locator('#camBtn').click();
+  await p.waitForFunction(() => fixture.pending.length === 1);
+  await p.locator('#camBtn').click();
+  await p.evaluate(() => fixture.pending.shift()());
+  await p.waitForFunction(() => fixture.streams.length === 1);
+  await noTracks(p);
+  await pressed(p, 'camBtn', false);
+  assert.equal(await p.locator('#camPip').isHidden(), true);
+});
+
+test('camera restart ignores an old socket closing; preview hiding keeps camera on', async t => {
+  const p = await open(t);
+  await p.locator('#camBtn').click();
+  await pressed(p, 'camBtn', true);
+  await p.locator('#t-set').click();
+  await p.locator('#camSelect').selectOption({ index: 1 });
+  await p.waitForFunction(() => fixture.streams.length === 2 && fixture.sockets.length === 2);
+  await p.evaluate(() => fixture.sockets[0].onclose({}));
+  await pressed(p, 'camBtn', true);
+  await p.locator('#camPip').focus();
+  await p.keyboard.press('ArrowRight');
+  await p.keyboard.press('Enter');
+  await p.locator('#pipHideBtn').click();
+  assert.equal(await p.locator('#camPip').evaluate(e => e.classList.contains('collapsed')), true);
+  assert.equal(await p.evaluate(() => fixture.streams[1].getTracks()[0].readyState), 'live');
+  assert.ok(await p.evaluate(() => localStorage.getItem('openamika-camPipPos')));
+  await p.locator('#camBtn').click();
+  await noTracks(p);
+  await p.reload();
+  assert.equal(await p.locator('#camPip').evaluate(e => e.classList.contains('collapsed')), true);
+});
+
+test('disconnect cancels pending microphone capture; permission denial can be retried', async t => {
+  const p = await open(t);
+  await p.evaluate(() => { fixture.holdMedia = true; });
+  await p.locator('#micBtn').click();
+  await p.waitForFunction(() => fixture.pending.length === 1);
+  await p.locator('#powerBtn').click();
+  await p.evaluate(() => fixture.pending.shift()());
+  await p.waitForFunction(() => fixture.streams.length === 1);
+  await noTracks(p);
+  await pressed(p, 'micBtn', false);
+  await p.evaluate(() => { fixture.holdMedia = false; fixture.denyMedia = true; });
+  await p.locator('#micBtn').click();
+  await p.waitForFunction(() => document.querySelector('.oa-toast')?.textContent.includes('refused'));
+  await p.evaluate(() => { fixture.denyMedia = false; });
+  await p.locator('#micBtn').click();
+  await pressed(p, 'micBtn', true);
+  await p.locator('#micBtn').click();
+  await noTracks(p);
+});
+
+test('an unplugged saved camera falls back to the default without losing its preference', async t => {
+  const p = await open(t);
+  await p.evaluate(() => localStorage.setItem('openamika-camDevice', 'missing-camera'));
+  await p.reload();
+  await p.locator('#camBtn').click();
+  await pressed(p, 'camBtn', true);
+  assert.equal(await p.evaluate(() => fixture.requests.length), 2);
+  assert.equal(await p.evaluate(() => localStorage.getItem('openamika-camDevice')), 'missing-camera');
+  await p.locator('#camBtn').click();
+  await noTracks(p);
+});
+
+test('lock persists; shortcuts do not run while typing or repeating', async t => {
+  const p = await open(t);
+  await p.locator('#lockBtn').click();
+  await p.reload();
+  await pressed(p, 'lockBtn', true);
+  await p.locator('#sayInput').fill('lwmcf');
+  await pressed(p, 'lockBtn', true);
+  await p.locator('#lockBtn').focus();
+  await p.evaluate(() => document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'l', repeat: true, bubbles: true })));
+  await pressed(p, 'lockBtn', true);
+});
+
+test('full screen enter/exit restores navigation and a blocked request fills the window', async t => {
+  const p = await open(t);
+  await p.locator('#fsBtn').click();
+  await p.locator('[data-mode="fullscreen"]').click();
+  await p.waitForFunction(() => document.fullscreenElement?.id === 'stageArea');
+  assert.equal(await p.locator('.oa-nav').evaluate(e => e.inert), true);
+  await p.locator('#fsBtn').click();
+  await p.waitForFunction(() => !document.fullscreenElement && !document.querySelector('.oa-nav').inert);
+  await p.evaluate(() => { stageArea.requestFullscreen = () => Promise.reject(new Error('blocked')); });
+  await p.locator('#fsBtn').click();
+  await p.locator('[data-mode="fullscreen"]').click();
+  await p.waitForFunction(() => stageArea.classList.contains('u-big'));
+  await p.locator('#sayInput').focus();
+  await p.keyboard.press('Escape');
+  assert.equal(await p.locator('.oa-nav').evaluate(e => e.inert), false);
+});
+
+test('navigation fits through the compact breakpoint without widening the page', async t => {
+  const p = await open(t);
+  for (const width of [560, 561, 600, 650, 700, 701, 760, 761]) {
+    await p.setViewportSize({ width, height: 900 });
+    assert.equal(await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `no overflow at ${width}px`);
+    const stage = await p.locator('#stageArea').boundingBox();
+    assert.ok(Math.abs(stage.x - (width - stage.x - stage.width)) < 1, `equal stage margins at ${width}px`);
+    await p.locator('.oa-mode button[data-mode="simple"]').click();
+    if (width <= 760) {
+      assert.equal(await p.evaluate(() => document.documentElement.classList.contains('mode-pro')), true);
+      await p.locator('.oa-mode button[data-mode="pro"]').click();
+      assert.equal(await p.evaluate(() => document.documentElement.classList.contains('mode-simple')), true);
+    }
+  }
+});
+
+test('compact health indicator is circular and centered, and still opens status details', async t => {
+  const p = await open(t);
+  for (const width of [390, 561, 700, 760, 761, 1100]) {
+    await p.setViewportSize({ width, height: 900 });
+    // Read both in one frame: wrapping may move the entire control between two awaited reads.
+    const { button, dot } = await p.evaluate(() => ({
+      button: navHealth.getBoundingClientRect().toJSON(), dot: navHealthLight.getBoundingClientRect().toJSON(),
+    }));
+    assert.ok(Math.abs(button.width - button.height) < 1, `circle at ${width}px`);
+    assert.ok(Math.abs(button.x + button.width / 2 - dot.x - dot.width / 2) < 1, `centered horizontally at ${width}px`);
+    assert.ok(Math.abs(button.y + button.height / 2 - dot.y - dot.height / 2) < 1, `centered vertically at ${width}px`);
+    await p.locator('#navHealth').click();
+    assert.equal(await p.locator('.oa-health-pop').isVisible(), true);
+    await p.keyboard.press('Escape');
+    assert.equal(await p.locator('.oa-health-pop').count(), 0);
+  }
+  await p.setViewportSize({ width: 1101, height: 900 });
+  assert.equal(await p.locator('#navHealthLabel').isVisible(), true);
+});
+
+test('links wrap only when the active mode needs the space, and wrapped links are centered', async t => {
+  const p = await open(t);
+  const firstSingleRow = {};
+  for (const mode of ['simple', 'pro']) {
+    await p.setViewportSize({ width: 760, height: 900 });
+    if (!(await p.evaluate(mode => document.documentElement.classList.contains('mode-' + mode), mode))) {
+      await p.locator('.oa-mode button.active').click();
+    }
+    for (let width = 320; width <= 760; width += 10) {
+      await p.setViewportSize({ width, height: 900 });
+      await p.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const layout = await p.evaluate(() => {
+        const links = [...document.querySelectorAll('.oa-nav-links a')].filter(e => e.getBoundingClientRect().width);
+        const boxes = links.map(e => e.getBoundingClientRect());
+        const brand = document.querySelector('.oa-wordmark').getBoundingClientRect();
+        return { wrapped: boxes[0].top >= brand.bottom, center: (boxes[0].left + boxes.at(-1).right) / 2,
+          overflow: document.documentElement.scrollWidth > innerWidth };
+      });
+      assert.equal(layout.overflow, false, `${mode} at ${width}px`);
+      if (layout.wrapped) assert.ok(Math.abs(layout.center - width / 2) < 1, `centered links: ${mode} at ${width}px`);
+      else firstSingleRow[mode] ??= width;
+    }
+    assert.ok(firstSingleRow[mode] < 760, `${mode} stays on one row before 760px`);
+  }
+  assert.ok(firstSingleRow.simple < firstSingleRow.pro, 'shorter Simple label leaves room for links sooner');
+  // Resize is not required: changing the mode itself must recompute the layout.
+  await p.setViewportSize({ width: firstSingleRow.simple, height: 900 });
+  await p.locator('.oa-mode button.active').click();
+  assert.equal(await p.locator('.oa-nav').evaluate(e => e.classList.contains('oa-nav-wrapped')), false);
+  await p.locator('.oa-mode button.active').click();
+  assert.equal(await p.locator('.oa-nav').evaluate(e => e.classList.contains('oa-nav-wrapped')), true);
+});
+
+test('painted health dot and ring share a center at different display scales', async t => {
+  for (const scale of [1, 1.25, 1.5, 2]) {
+    const p = await open(t, { width: 650, height: 900 }, scale);
+    await p.waitForFunction(() => navHealthLabel.textContent !== 'Checking…');
+    await p.addStyleTag({ content: '.oa-health .light { transition: none; }' });
+    await p.locator('#navHealthLight').evaluate(e => { e.className = 'light ok'; });
+    const b = await p.locator('#navHealth').boundingBox();
+    const shot = await p.screenshot({ clip: { x: Math.floor(b.x) - 4, y: Math.floor(b.y) - 4, width: Math.ceil(b.width) + 8, height: Math.ceil(b.height) + 8 } });
+    // Decode the actual screenshot in canvas: DOM rectangles alone miss paint-time snapping.
+    const centers = await p.evaluate(async base64 => {
+      const image = new Image(); image.src = 'data:image/png;base64,' + base64; await image.decode();
+      const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+      const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0);
+      const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const dot = [], ring = [];
+      for (let y = 0; y < canvas.height; y++) for (let x = 0; x < canvas.width; x++) {
+        const i = (y * canvas.width + x) * 4, r = data[i], g = data[i + 1], b = data[i + 2];
+        if (g > 130 && g > r * 1.5 && g > b * 1.1) dot.push([x, y]);
+        if (r > 30 && b > r && r > g && g < 65) ring.push([x, y]);
+      }
+      const center = pixels => [0, 1].map(axis => (Math.min(...pixels.map(p => p[axis])) + Math.max(...pixels.map(p => p[axis]))) / 2);
+      return { dot: center(dot), ring: center(ring), counts: [dot.length, ring.length] };
+    }, shot.toString('base64'));
+    assert.ok(centers.counts.every(n => n > 0), 'both circles present in screenshot');
+    // Fractional scaling can round opposite edges differently by one physical pixel.
+    const tolerance = Number.isInteger(scale) ? 0 : 0.5;
+    for (const axis of [0, 1]) assert.ok(Math.abs(centers.dot[axis] - centers.ring[axis]) <= tolerance, `painted center at ${scale}x, axis ${axis}: ${JSON.stringify(centers)}`);
+    await p.close();
+  }
+});
+
+for (const [width, height] of [[320, 740], [390, 844], [844, 390], [1024, 768], [1440, 900]]) {
+  test(`layout and navigation at ${width}x${height}`, async t => {
+    const p = await open(t, { width, height });
+    assert.equal(await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await p.locator('#t-set').click();
+    assert.equal(await p.locator('#tp-set').isVisible(), true);
+    await p.keyboard.press('ArrowLeft');
+    assert.equal(await p.locator('#tp-chat').isVisible(), true);
+    await p.locator('.oa-mode button[data-mode="simple"]').click();
+    if (width <= 760) assert.equal(await p.evaluate(() => document.documentElement.classList.contains('mode-pro')), true);
+    await p.locator('#fsBtn').click();
+    await p.locator('[data-mode="window"]').click();
+    const box = await p.locator('#sayInput').boundingBox();
+    assert.ok(box.x >= 0 && box.x + box.width <= width && box.y + box.height <= height);
+    await p.keyboard.press('Escape');
+  });
+}
+
+test('pet stage fills its window transparently and keeps only pet controls', async t => {
+  const p = await open(t, { width: 320, height: 560 }, 1, true, { pet: true, host: true });
+  assert.equal(await p.evaluate(() => fixture.avatarOptions.fixed), true);
+  assert.equal(await p.locator('.oa-nav').count(), 0);
+  assert.equal(await p.locator('.u-main').isHidden(), true);
+  assert.equal(await p.locator('#stageArea').evaluate(e => e.parentElement === document.body), true);
+  assert.equal(await p.locator('#stageCanvas').evaluate(e => e.classList.contains('pywebview-drag-region')), true);
+  for (const [width, height] of [[320, 560], [160, 240], [480, 800]]) {
+    await p.setViewportSize({ width, height });
+    const box = await p.locator('#stageArea').boundingBox();
+    assert.deepEqual(box, { x: 0, y: 0, width, height });
+    for (const selector of ['html', 'body', '#stageArea']) {
+      assert.equal(await p.locator(selector).evaluate(e => getComputedStyle(e).backgroundColor), 'rgba(0, 0, 0, 0)');
+    }
+    for (const selector of ['.u-vignette', '.u-top', '.u-dock', '.u-stage-cam', '.stage-hud']) {
+      assert.equal(await p.locator(selector).isHidden(), true, selector + ' hidden in pet');
+    }
+    await p.locator('#powerBtn').focus();
+    const bar = await p.locator('.pet-bar').boundingBox();
+    assert.ok(bar.x >= 0 && bar.x + bar.width <= width, 'all controls fit at ' + width);
+    for (const button of await p.locator('.pet-bar > button').all()) {
+      await p.waitForFunction(e => getComputedStyle(e).opacity === '1', await button.elementHandle());
+    }
+  }
+  // Page-only shortcuts cannot silently turn on the pet's hidden camera or change the browser's model lock.
+  const lock = await p.evaluate(() => localStorage.getItem('openamika-stageLocked'));
+  for (const key of ['c', 'w', 'f', 'l']) await p.keyboard.press(key);
+  assert.equal(await p.evaluate(() => fixture.requests.length), 0);
+  assert.equal(await p.locator('#stageArea').evaluate(e => e.classList.contains('u-big')), false);
+  assert.equal(await p.evaluate(() => localStorage.getItem('openamika-stageLocked')), lock);
+  await p.clock.install();
+  await p.clock.fastForward(31 * 60 * 1000);
+  assert.equal(await p.locator('#donate-modal').isHidden(), true, 'no donation overlay in the pet');
+});
+
+test('pet window controls call the native bridge and mic capture remains visible until stopped', async t => {
+  const p = await open(t, { width: 320, height: 560 }, 1, true, { pet: true, host: true });
+  await p.locator('#powerBtn').click();
+  await p.waitForFunction(() => fixture.sockets[0]?.readyState === 1);
+  await p.locator('#stageCanvas').hover({ position: { x: 100, y: 100 } });
+  await p.mouse.wheel(0, -100);
+  await p.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'zoom' && c[1] > 1));
+  await p.getByRole('button', { name: 'Open the full page (closes this window)', exact: true }).click();
+  await p.getByRole('button', { name: 'Close her window (she keeps running)', exact: true }).click();
+  assert.equal(await p.evaluate(() => fixture.hostCalls.filter(c => c[0] === 'full_page').length), 1);
+  assert.equal(await p.evaluate(() => fixture.hostCalls.filter(c => c[0] === 'close').length), 1);
+  await p.keyboard.press('m');
+  await pressed(p, 'micBtn', true);
+  // Remove hover/focus visibility to verify that an active mic is still shown.
+  await p.evaluate(() => document.activeElement.blur());
+  await p.mouse.move(-10, -10);
+  await p.waitForFunction(() => getComputedStyle(micBtn).opacity === '1');
+  await p.keyboard.press('m');
+  await pressed(p, 'micBtn', false);
+  await noTracks(p);
+});
+
+for (const pet of [false, true]) {
+  test(`playback acknowledgements and forced-stop recovery in ${pet ? 'pet' : 'browser'}`, async t => {
+    const p = await open(t, undefined, 1, true, { pet });
+    await p.locator('#powerBtn').click();
+    await p.waitForFunction(() => fixture.sockets[0]?.readyState === 1);
+    await p.evaluate(() => {
+      const meta = { ack: true, turn_id: 'merged-turn', idx: 0, kind: 'deep', text: 'Hello' };
+      fixture.avatarOptions.onChunkStart(meta, null);
+      fixture.avatarOptions.onChunkEnd(meta);
+    });
+    const sent = await p.evaluate(() => fixture.sockets[0].sent.filter(x => typeof x === 'string').map(JSON.parse));
+    for (const type of ['tts_playing', 'tts_finished']) assert.equal(sent.filter(x => x.type === type && x.turn_id === 'merged-turn').length, 1);
+    await p.evaluate(() => fixture.sockets[0].onmessage({ data: JSON.stringify({ type: 'ai_surface_done', mode: 'think', surface_tts_done: true }) }));
+    const before = await p.evaluate(() => fixture.flushCount);
+    await p.evaluate(() => fixture.sockets[0].onmessage({ data: JSON.stringify({ type: 'stop_audio' }) }));
+    assert.equal(await p.evaluate(() => fixture.flushCount), before + 1);
+    assert.equal(await p.evaluate(() => fixture.busy), false);
+    assert.equal(await p.locator('#hudSay').textContent(), '');
+    await p.evaluate(() => fixture.sockets[0].onmessage({ data: JSON.stringify({ type: 'ai_error', provider: 'OpenRouter', message: 'Provider refused this reply' }) }));
+    assert.ok((await p.locator('#chatLog').textContent()).includes('Provider refused this reply'));
+    await p.locator('#powerBtn').click();
+    await pressed(p, 'powerBtn', false);
+  });
+}
+
+test('shared controls retain saved devices and forward the upstream model-unlock header', async t => {
+  const p = await open(t);
+  let received;
+  await p.route('**/api/build_f/preset', async route => {
+    received = { headers: route.request().headers(), body: route.request().postDataJSON() };
+    await route.fulfill({ json: { ok: true } });
+  });
+  await p.evaluate(async () => {
+    OA.devices.set('mic', 'chosen-microphone');
+    await OA.postAction('/api/build_f/preset', 'apply-preset', { force: true }, { 'X-Build-F-Force': '1' });
+  });
+  assert.equal(received.headers['x-build-f-force'], '1');
+  assert.equal(received.headers['x-build-f-action'], 'apply-preset');
+  assert.deepEqual(received.body, { force: true });
+  assert.equal(await p.evaluate(() => OA.devices.get('mic')), 'chosen-microphone');
+  assert.equal(await p.evaluate(() => OA.keyBalance({ credits: { ok: true, empty: true } }).level), 'err');
+});

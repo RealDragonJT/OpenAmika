@@ -356,7 +356,7 @@ GPU memory). Attach it when you ask on [Discord](https://discord.gg/mekahime) or
 She can also stand on your desktop by herself: a see-through window with only her in it, on top of your other
 programs, with her voice, lip-sync and expressions as on the Use page. Windows only.
 
-**From the Use page (the easy way):** press **Desktop pet** at the top of her stage.
+**From the Use page (the easy way):** open the expand menu at the top-right of her stage and choose **Desktop pet**.
 
 1. The first time, the page asks for one small install (pywebview, a few megabytes). Press **Install and open**.
 2. Her window opens on your desktop and the conversation goes with her: if she was on, she is on there; if your
@@ -365,6 +365,15 @@ programs, with her voice, lip-sync and expressions as on the Use page. Windows o
 
 The button shows only in a browser on the PC that runs her (her window opens on that PC's desktop), so not on your
 phone.
+
+If **Voice output** is off, she asks before moving: **Enable and move** turns spoken replies on for the pet;
+**Cancel** leaves the browser session untouched. A failed move keeps the previous voice setting. After a successful
+move, spoken replies stay enabled when you bring her back to the browser.
+
+The microphone and audio output selected in the web page carry over to her desktop window. Hover the microphone
+for its input name, or power for the output name. If a named device is unavailable or ambiguous, the move fails
+and the browser session is restored. System default stays System default. The webcam switches off after a
+successful move; bring her back and enable it again when you want to use it. Pet controls keep their softer styling.
 
 **Straight to the desktop:** double-click `Start_OpenAmika_Pet.bat` instead of `Start_OpenAmika.bat` (or run
 `launch.py --pet`): when she is ready, her window opens instead of the browser page. This way does not install

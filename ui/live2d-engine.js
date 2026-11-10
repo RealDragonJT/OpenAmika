@@ -243,6 +243,10 @@
     else persistView();
   }
 
+  // the Use page's lock: while set, a drag, the wheel or a pinch never moves or zooms her (or the doll), and the
+  // wheel / a finger fall through to the page so it scrolls
+  let viewLocked = false;
+
   function setupDragZoom() {
     if (fixedView) { window.addEventListener("resize", notifyResize); return; }
     let dragging = false, target = null, dragStartX = 0, dragStartY = 0, modelStartX = 0, modelStartY = 0;
@@ -254,7 +258,7 @@
       return true;
     };
     const move = (x, y) => {
-      if (!dragging || !target) return;
+      if (!dragging || !target || viewLocked) return;
       target.x = modelStartX + (x - dragStartX);
       target.y = modelStartY + (y - dragStartY);
     };
@@ -263,10 +267,11 @@
       dragging = false; areaEl.style.cursor = "";
       persistTarget(target);
     };
-    areaEl.addEventListener("mousedown", (e) => { if (begin(e.clientX, e.clientY)) areaEl.style.cursor = "grabbing"; });
+    areaEl.addEventListener("mousedown", (e) => { if (!viewLocked && begin(e.clientX, e.clientY)) areaEl.style.cursor = "grabbing"; });
     document.addEventListener("mousemove", (e) => move(e.clientX, e.clientY));
     document.addEventListener("mouseup", end);
     areaEl.addEventListener("wheel", (e) => {
+      if (viewLocked) return;
       const t = pickTarget(e.clientX, e.clientY);
       if (!t) return;
       e.preventDefault();
@@ -276,7 +281,7 @@
       persistTarget(t);
     }, { passive: false });
     areaEl.addEventListener("touchstart", (e) => {
-      if (!live2dModel) return;
+      if (!live2dModel || viewLocked) return;
       if (e.touches.length === 2) {
         if (!target) target = pickTarget(e.touches[0].clientX, e.touches[0].clientY);
         const dx = e.touches[0].clientX - e.touches[1].clientX;
@@ -288,7 +293,7 @@
       }
     }, { passive: false });
     areaEl.addEventListener("touchmove", (e) => {
-      if (!target) return;
+      if (!target || viewLocked) return;
       if (e.touches.length === 2 && pinchStartDist > 0) {
         const dx = e.touches[0].clientX - e.touches[1].clientX;
         const dy = e.touches[0].clientY - e.touches[1].clientY;
@@ -327,6 +332,13 @@
     repositionAgent();
   }
 
+  function assetFilename(url) {
+    if (typeof url !== "string") return "";
+    const file = url.split(/[?#]/, 1)[0].split("/").pop();
+    // Compare filenames, but leave the original versioned URL intact for the loader.
+    try { return decodeURIComponent(file); } catch (_) { return file; }
+  }
+
   async function injectExternalMotions(motionManager, opt) {
     if (!motionManager || !motionManager.definitions) return;
     const groups = Object.keys(motionManager.definitions);
@@ -335,13 +347,13 @@
     if (!Array.isArray(gm)) return;
     try {
       const list = await (await fetch(opt.motions_url)).json();
-      const existing = new Set(gm.map((m) => (m && m.File && m.File.split("/").pop()) || (m && m.File)).filter(Boolean));
+      const existing = new Set(gm.map((m) => assetFilename(m && m.File)).filter(Boolean));
       let added = 0;
       for (const item of list) {
         if (item.type === "expression") continue;
-        const fn = item.file || (item.path && item.path.split("/").pop());
+        const fn = item.file || assetFilename(item.path);
         if (!fn || !fn.endsWith(".motion3.json") || existing.has(fn)) continue;
-        gm.push({ File: fn, FadeInTime: 0.5, FadeOutTime: 0.5 });
+        gm.push({ File: item.path || fn, FadeInTime: 0.5, FadeOutTime: 0.5 });
         existing.add(fn); added++;
       }
       if (added) console.info(`[Live2D] injected ${added} external motion(s)`);
@@ -476,7 +488,7 @@
     if (!internal) return;
     if (internal.motionManager && internal.motionManager.expressionManager) {
       const defs = internal.motionManager.expressionManager.definitions;
-      const idx = defs.findIndex((d) => d.File === fn || d.Name === fn || (d.File && d.File.endsWith(fn)));
+      const idx = defs.findIndex((d) => d.Name === fn || assetFilename(d.File) === fn);
       if (idx >= 0) {
         internal.motionManager.expressionManager.setExpression(idx);
         activeExpressions.add(fn);
@@ -613,6 +625,8 @@
     wsGainNode.connect(wsAnalyser);
     wsGainNode.connect(outputVolumeAnalyser);
     wsGainNode.connect(wsAudioContext.destination);
+    const sink = safeGet("openamika-speakerDevice");
+    if (sink && typeof wsAudioContext.setSinkId === "function") wsAudioContext.setSinkId(sink).catch(() => {});
     if (!_wsLipSyncBound) _wsLipSyncBound = () => updateLipSyncFromWS();
     if (pixiApp && pixiApp.ticker) {
       const L = (PIXI.UPDATE_PRIORITY && PIXI.UPDATE_PRIORITY.LOW) != null ? PIXI.UPDATE_PRIORITY.LOW : -100;
@@ -1115,10 +1129,7 @@
     const groups = Object.keys(mm.definitions || {});
     if (!groups.length) return false;
     const g = groups[0], defs = mm.definitions[g] || [];
-    const idx = defs.findIndex((d) => {
-      const f = d.File || "";
-      return f === name + ".motion3.json" || f.endsWith("/" + name + ".motion3.json");
-    });
+    const idx = defs.findIndex((d) => assetFilename(d.File) === name + ".motion3.json");
     if (idx < 0) return false;
     m.motion(g, idx, 3);
     agent.lastMotion = name;
@@ -1279,11 +1290,17 @@
       safeSet("openamika-outputGain", String(g));
       if (wsGainNode) wsGainNode.gain.value = g;
     },
+    // her voice through another speaker ("" = the system default); true when the browser took it
+    async setOutputDevice(id) {
+      if (!wsAudioContext || typeof wsAudioContext.setSinkId !== "function") return true;   // applied when the context starts
+      try { await wsAudioContext.setSinkId(id || ""); return true; } catch (_) { return false; }
+    },
     setLipSyncGain(v) {
       const g = Math.max(0.1, Math.min(5, Number(v) || 1.5));
       lipSyncCalibration.sensitivity = g;
       safeSet("openamika-lipSyncGain", String(g));
     },
+    setLocked(on) { viewLocked = !!on; },
     resetView() {
       if (currentId) {
         try { localStorage.removeItem("openamika-avatar-view-" + currentId); } catch (_) {}

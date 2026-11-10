@@ -9,8 +9,10 @@ prompt tests) and run against a fake clock; the setting's route runs on the real
 import inspect
 import json
 import sys
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _po_support import extract_webui, prepare_prompt_namespace  # noqa: E402
@@ -55,6 +57,63 @@ class SilenceClockTests(unittest.TestCase):
 
     def quiet_remark_due(self):
         return self.ns["_idle_check_and_arm"]()
+
+    def run_proactive_turn(self, cue, outcome="success"):
+        """Run the real generation lifecycle with a fixture provider and fake clock."""
+        entry = {"cancel": threading.Event(), cue: "Say something"}
+        socket = test_f_bridge.FakeSocket()
+        completed, discarded = [], []
+
+        def stream(*args):
+            self.clock.advance(5)
+            if outcome == "failure":
+                raise RuntimeError("fixture provider failed")
+            if outcome == "cancel":
+                entry["cancel"].set()
+            yield '[casual_neutral]"Hello."\n我心想：打个招呼。'
+
+        replacements = {
+            "socketio": socket, "AVAILABLE_MODELS": {"fixture": {}},
+            "_find_turn": lambda tid: {}, "build_messages": lambda *a, **kw: {},
+            "_with_round_context": lambda parts, context: parts, "_with_capabilities": lambda parts: parts,
+            "_pick_stream": stream, "update_turn_deep": lambda *a: None,
+            "f_mark_complete": completed.append, "discard_turn": discarded.append,
+            "_tools_after_turn": lambda *a: None, "_describe_provider_error": lambda e: None,
+        }
+        self.ns["_ws_active"]["proactive"] = entry
+        with patch.dict(self.ns, replacements):
+            self.ns["_ws_run_generation"]("sid-1", "proactive", "", "fixture", "fixture", entry)
+        self.assertNotIn("proactive", self.ns["_ws_active"])
+        return socket.emits, completed, discarded
+
+    def test_successful_proactive_turn_waits_for_playback_before_counting_silence(self):
+        for cue in ("open_cue", "inject_cue"):
+            with self.subTest(cue=cue):
+                self.setUp()
+                emits, completed, discarded = self.run_proactive_turn(cue)
+                self.assertEqual(completed, ["proactive"], emits)
+                self.assertEqual(discarded, [])
+                self.assertIn("end", [name for name, *_ in emits])
+                self.assertEqual([data["speech"] for name, data, _ in emits if name == "deep_done"], ["Hello."])
+                self.clock.advance(45)
+                self.assertFalse(self.quiet_remark_due(), 'proactive audio is still playing')
+                self.ns["_voice_stopped"]("proactive")
+                self.clock.advance(29)
+                self.assertFalse(self.quiet_remark_due())
+                self.clock.advance(2)
+                self.assertTrue(self.quiet_remark_due())
+
+    def test_cancelled_or_failed_proactive_turn_releases_the_voice_marker(self):
+        for cue in ("open_cue", "inject_cue"):
+            for outcome in ("cancel", "failure"):
+                with self.subTest(cue=cue, outcome=outcome):
+                    self.setUp()
+                    emits, completed, discarded = self.run_proactive_turn(cue, outcome)
+                    self.assertEqual(completed, [])
+                    self.assertEqual(discarded, ["proactive"], emits)
+                    self.assertEqual(self.ns["_voice_pending"], {})
+                    self.clock.advance(31)
+                    self.assertTrue(self.quiet_remark_due())
 
     def test_no_remark_while_her_voice_still_plays(self):
         self.turn("t1")

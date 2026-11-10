@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime
 from typing import List, Optional, Tuple
 from pathlib import Path
+from urllib.parse import quote
 
 warnings.filterwarnings("ignore", message=".*ffmpeg.*")
 
@@ -38,7 +39,9 @@ from tts_sfx import parse_sfx_delta, resolve_sfx, list_files as sfx_list_files
 from tts_pause import pause_after
 from tts_text import voice_text
 import voice_adapter
+from avatar_cache import asset_response, model_response, versioned_reference
 import pet_window
+
 from silero_vad import load_silero_vad
 
 import sys
@@ -184,6 +187,8 @@ async def _revalidate_page_assets(request: Request, call_next):
     response = await call_next(request)
     if request.url.path.startswith(("/ui/", "/static/")) and "cache-control" not in response.headers:
         response.headers["Cache-Control"] = "no-cache"
+    if request.url.path.startswith("/api/avatar/") and "cache-control" not in response.headers:
+        response.headers["Cache-Control"] = "private, no-cache"
     return response
 AVATAR_MODELS_DIR = Path(__file__).resolve().parent.parent / "avatar" / "models"
 
@@ -1725,19 +1730,22 @@ async def avatar_models():
     return {"ok": True, "models": models, "emotions": list(voice_adapter.V2_KEYS)}
 
 
-@app.get("/api/avatar/models/{model_id}/motions")
-async def avatar_motions(model_id: str):
-    d = _avatar_dir(model_id)
+def _avatar_motion_entries(d: Path, model_id: str):
     out = []
     for p in sorted(d.rglob("*.motion3.json")):
         rel = p.relative_to(d).as_posix()
         out.append({"type": "motion", "name": p.name[:-len(".motion3.json")],
-                    "file": p.name, "path": f"/avatar_models/{model_id}/{rel}"})
+                    "file": p.name, "path": f"/avatar_models/{quote(model_id, safe='')}/" + versioned_reference(quote(rel), d, d)})
     for p in sorted(d.rglob("*.exp3.json")):
         rel = p.relative_to(d).as_posix()
         out.append({"type": "expression", "name": p.name[:-len(".exp3.json")],
-                    "file": p.name, "path": f"/avatar_models/{model_id}/{rel}"})
+                    "file": p.name, "path": f"/avatar_models/{quote(model_id, safe='')}/" + versioned_reference(quote(rel), d, d)})
     return out
+
+
+@app.get("/api/avatar/models/{model_id}/motions")
+async def avatar_motions(model_id: str):
+    return await asyncio.to_thread(_avatar_motion_entries, _avatar_dir(model_id), model_id)
 
 
 @app.get("/api/avatar/models/{model_id}/banks")
@@ -1796,8 +1804,50 @@ async def avatar_banks_set(model_id: str, request: Request):
     return {"ok": True}
 
 
+def _avatar_document(target: Path, d: Path):
+    # pixi-live2d-display builds an empty motion manager when the model3.json
+    # declares no Motions — the sibling *.motion3.json files would be ignored.
+    # Inject Motions AND Expressions groups on the fly when absent.
+    try:
+        doc = json.loads(target.read_text(encoding="utf-8-sig"))
+        refs = doc.setdefault("FileReferences", {})
+
+        if not refs.get("Motions"):
+            motions = [{"File": p.relative_to(target.parent).as_posix(),
+                        "FadeInTime": 0.5, "FadeOutTime": 0.5}
+                       for p in sorted(target.parent.rglob("*.motion3.json"))]
+            if motions:
+                refs["Motions"] = {"Idle": motions}
+        if not refs.get("Expressions"):
+            exps = [{"Name": p.name, "File": p.relative_to(target.parent).as_posix()}
+                    for p in sorted(target.parent.rglob("*.exp3.json"))]
+            if exps:
+                refs["Expressions"] = exps
+
+        def _ver(rel):
+            return versioned_reference(rel, target.parent, d)
+
+        if isinstance(refs.get("Textures"), list):
+            refs["Textures"] = [_ver(t) for t in refs["Textures"]]
+        for key in ("Moc", "Physics", "DisplayInfo", "Pose", "UserData"):
+            if refs.get(key):
+                refs[key] = _ver(refs[key])
+        for motions in refs.get("Motions", {}).values():
+            for motion in motions:
+                for key in ("File", "Sound"):
+                    if motion.get(key):
+                        motion[key] = _ver(motion[key])
+        for expression in refs.get("Expressions", []):
+            expression["File"] = _ver(expression.get("File"))
+        return doc
+    except Exception:
+        logger.warning(f"[avatar] model3.json injection failed for {d.name}; serving raw file")
+        return None
+
+
 @app.get("/avatar_models/{model_id}/{file_path:path}")
-async def avatar_file(model_id: str, file_path: str):
+@app.head("/avatar_models/{model_id}/{file_path:path}")
+async def avatar_file(model_id: str, file_path: str, request: Request):
     d = _avatar_dir(model_id)
     try:
         target = (d / file_path).resolve()
@@ -1806,50 +1856,12 @@ async def avatar_file(model_id: str, file_path: str):
     if d.resolve() not in target.parents:
         raise HTTPException(status_code=403, detail="Path outside the model folder.")
     if not target.is_file():
-        raise HTTPException(status_code=404, detail="File not found.")
+        raise HTTPException(status_code=404, detail="File not found.", headers={"Cache-Control": "no-store"})
     if target.name.endswith(".model3.json"):
-        # pixi-live2d-display builds an empty motion manager when the model3.json
-        # declares no Motions — the sibling *.motion3.json files would be ignored.
-        # Inject Motions AND Expressions groups on the fly when absent.
-        try:
-            doc = json.loads(target.read_text(encoding="utf-8-sig"))
-            refs = doc.setdefault("FileReferences", {})
-
-            # Cache-bust the heavy binaries: stamp each reference with its file mtime,
-            # so an edited texture gets a URL the browser has never cached. (The old
-            # un-versioned entries could sit "fresh" for weeks via heuristic caching.)
-            def _ver(rel):
-                if not isinstance(rel, str) or not rel:
-                    return rel
-                try:
-                    stamp = int((target.parent / rel).stat().st_mtime)
-                except OSError:
-                    return rel
-                return f"{rel}?v={stamp}"
-
-            if isinstance(refs.get("Textures"), list):
-                refs["Textures"] = [_ver(t) for t in refs["Textures"]]
-            for key in ("Moc", "Physics", "DisplayInfo"):
-                if refs.get(key):
-                    refs[key] = _ver(refs[key])
-
-            if not refs.get("Motions"):
-                motions = [{"File": p.relative_to(target.parent).as_posix(),
-                            "FadeInTime": 0.5, "FadeOutTime": 0.5}
-                           for p in sorted(target.parent.rglob("*.motion3.json"))]
-                if motions:
-                    refs["Motions"] = {"Idle": motions}
-            if not refs.get("Expressions"):
-                exps = [{"Name": p.name, "File": p.relative_to(target.parent).as_posix()}
-                        for p in sorted(target.parent.rglob("*.exp3.json"))]
-                if exps:
-                    refs["Expressions"] = exps
-            return JSONResponse(doc, headers={"Cache-Control": "no-cache"})
-        except Exception:
-            logger.warning(f"[avatar] model3.json injection failed for {model_id}; serving raw file")
-    # no-cache = always revalidate (cheap 304s): edited textures/banks show up on a
-    # plain reload instead of hiding behind the browser's heuristic freshness window.
-    return FileResponse(target, headers={"Cache-Control": "no-cache"})
+        doc = await asyncio.to_thread(_avatar_document, target, d)
+        if doc is not None:
+            return model_response(doc, request)
+    return await asset_response(target, request)
 
 
 # ---------------------- stage scene: background photo + blur ---------------------- #
@@ -4645,7 +4657,7 @@ def _pet_guard(request, action):
 
 async def _pet_json(request):
     body = await request.body()
-    if len(body) > 1024:
+    if len(body) > 4096:
         raise HTTPException(status_code=400, detail="Control request is too large.")
     try:
         payload = json.loads(body or b"{}")
@@ -4678,12 +4690,19 @@ async def pet_state(request: Request):
 
 @app.post("/api/pet/open")
 async def pet_open(request: Request):
-    """Open her desktop window. Body {power, mic}: what the page had on. The page has closed its own dialog socket
-    first; her window switches the same on (pet.py --power --mic), so she goes on talking there."""
+    """Open her desktop window with the page's power, mic, voice_output and audio selections.
+    The page has closed its own dialog socket first; her window takes over the same settings."""
     global _pet_busy
     _pet_guard(request, "open-pet")
     payload = await _pet_json(request)
     power, mic = payload.get("power") is True, payload.get("mic") is True
+    voice_output = payload.get("voice_output")
+    if "voice_output" in payload and not isinstance(voice_output, bool):
+        raise HTTPException(status_code=400, detail="Voice output must be a boolean.")
+    audio = payload.get("audio")
+    if audio is not None and (not isinstance(audio, dict) or set(audio) != {"mic", "speaker"}
+                              or any(not isinstance(v, str) or len(v) > 256 for v in audio.values())):
+        raise HTTPException(status_code=400, detail="Audio selections must name a microphone and speaker.")
     if _pet_busy or _wipe_in_progress:
         return dict(_PET_BUSY)
     _pet_busy = True
@@ -4691,7 +4710,7 @@ async def pet_open(request: Request):
         if power:
             await _pet_session_gone(3)                   # the page's socket is on its way out
         if pet_window.running():
-            if not power:
+            if not power and audio is None and voice_output is None:
                 return {"ok": True, "already": True}
             # a window is open already and does not hold her session: a new one takes the session over
             closed = await asyncio.to_thread(pet_window.close)
@@ -4700,7 +4719,12 @@ async def pet_open(request: Request):
             await _pet_session_gone(4)
         # her own address from the launcher, never the request's Host header
         base = os.getenv("AMIKA_CHAT_URL") or f"http://localhost:{os.getenv('YUMEHA_PORT', '53000')}"
-        return await asyncio.to_thread(pet_window.start, base, power=power, mic=mic)
+        options = {"power": power, "mic": mic}
+        if voice_output is not None:
+            options["voice_output"] = voice_output
+        if audio is not None:
+            options["audio"] = audio
+        return await asyncio.to_thread(pet_window.start, base, **options)
     finally:
         _pet_busy = False
 

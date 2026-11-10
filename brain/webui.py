@@ -3232,6 +3232,7 @@ def _ws_run_generation(sid: str, turn_id: str, text: str,
                 return
             f_mark_complete(turn_id)
             _emit("end")
+            entry["_spoke"] = True  # proactive audio also waits for speech_done before counting silence
             # 开口轮说完也过一遍书记员：她可能这时才答应他上一轮的要求（引用来源仍是他自己的话；注入轮不跑）。
             _tools_after_turn(turn_id, "", None, entry.get("deep_parsed"), proactive_cue, reply_lang, entry)
             return
