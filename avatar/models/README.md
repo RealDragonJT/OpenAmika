@@ -46,6 +46,19 @@ Notes:
 - If the `.model3.json` has no `Motions`/`Expressions` blocks, the server injects sibling
   `*.motion3.json` / `*.exp3.json` files automatically when serving it.
 
+## Browser caching
+
+The browser keeps downloaded avatar files in its normal cache, including between visits.
+On opening the page, OpenAmika checks the small model description and motion list. Local asset
+URLs include a SHA-256 content version, so changing one file downloads that file again while
+unchanged textures, model binaries, motions, and expressions can be reused. A normal page reload
+picks up edits; changing only a file's timestamp does not invalidate its content version.
+
+Versioned files use a private, long-lived browser cache. Unversioned requests and the generated
+model description revalidate with ETags and return an empty `304` response when unchanged.
+Clearing browser data, cache eviction, or using another browser/address can require another
+download. The browser still needs to prepare the model for rendering on each new page.
+
 ## The agent avatar (`role: agent`)
 
 One model folder may stand in for her helpers (Hermes, nanoMuse) instead of being a model she wears.

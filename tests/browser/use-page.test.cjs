@@ -26,10 +26,13 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
     if (p === '/use' || p.startsWith('/ui/')) {
       const f = path.join(root, p === '/use' ? 'ui/use.html' : p.slice(1));
       const contentType = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.webp': 'image/webp' }[path.extname(f)];
-      if (readyAvatar && p === '/ui/live2d-engine.js') {
+      if ((readyAvatar || options.pendingAvatar) && p === '/ui/live2d-engine.js') {
         // Simulate a loaded model and observe the busy-display API without licensed model assets.
         const body = await fs.readFile(f, 'utf8') + `
-          OpenAmikaAvatar.init = async options => { fixture.avatarOptions = options; return { ok: true }; };
+          OpenAmikaAvatar.init = async options => {
+            fixture.avatarOptions = options;
+            ${options.pendingAvatar ? 'return new Promise((resolve, reject) => { fixture.completeAvatar = resolve; fixture.failAvatar = reject; });' : 'return { ok: true };'}
+          };
           fixture.busyHistory = [];
           OpenAmikaAvatar.setBusy = on => { fixture.busy = on; fixture.busyHistory.push(on); };
           const flush = OpenAmikaAvatar.flush;
@@ -75,12 +78,125 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
     };
   }, { host: !!options.host });
   await page.goto('http://localhost:53999/use?' + (options.pet ? 'pet=1' : 'kiosk=1'));
-  await page.waitForFunction(ready => window.OA && window.OpenAmikaAvatar &&
-    (ready ? Array.isArray(fixture.busyHistory) && fixture.busyHistory.length : !document.querySelector('#stageEmpty').hidden), readyAvatar);
+  await page.waitForFunction(({ ready, pending }) => window.OA && window.OpenAmikaAvatar &&
+    (pending ? !!fixture.avatarOptions : ready ? Array.isArray(fixture.busyHistory) && fixture.busyHistory.length
+      : !document.querySelector('#stageEmpty').hidden), { ready: readyAvatar, pending: !!options.pendingAvatar });
   return page;
 }
 const pressed = (page, id, value) => page.waitForFunction(([id, value]) => document.getElementById(id).getAttribute('aria-pressed') === String(value), [id, value]);
 const noTracks = page => page.waitForFunction(() => fixture.streams.every(s => s.getTracks().every(t => t.readyState === 'ended')));
+
+async function engineFunctions(names, bindings = {}) {
+  const source = (await fs.readFile(path.join(root, 'ui/live2d-engine.js'), 'utf8')).replace(/\r\n/g, '\n');
+  const helpers = source.includes('function assetFilename(') ? ['assetFilename'] : [];
+  const pieces = [...helpers, ...names].map(name => {
+    let start = source.indexOf('function ' + name + '(');
+    assert.ok(start >= 0, name + ' exists');
+    if (source.slice(start - 6, start) === 'async ') start -= 6;
+    const end = source.indexOf('\n  }\n', start);
+    assert.ok(end > start, name + ' body exists');
+    return source.slice(start, end + 5);
+  });
+  return new Function(...Object.keys(bindings), pieces.join('\n') + '; return {' + names.join(',') + '};')(...Object.values(bindings));
+}
+
+test('versioned motion URLs stay intact without duplicating existing motions', async () => {
+  const entries = [
+    { type: 'motion', file: 'idle.motion3.json', path: '/avatar_models/Model/idle.motion3.json?v=one' },
+    { type: 'motion', file: 'new.motion3.json', path: '/avatar_models/Model/sub/new.motion3.json?v=two' },
+    { type: 'expression', file: 'smile.exp3.json', path: '/avatar_models/Model/smile.exp3.json?v=three' },
+  ];
+  const { injectExternalMotions: inject } = await engineFunctions(['injectExternalMotions'], {
+    fetch: async () => ({ json: async () => entries }),
+  });
+  const manager = { definitions: { Idle: [{ File: 'idle.motion3.json?v=one' }] } };
+  await inject(manager, { motions_url: '/registry' });
+  await inject(manager, { motions_url: '/registry' });
+  assert.deepEqual(manager.definitions.Idle.map(m => m.File), [
+    'idle.motion3.json?v=one', '/avatar_models/Model/sub/new.motion3.json?v=two',
+  ]);
+});
+
+test('agent idle and state motions match versioned URLs without changing the download URL', async () => {
+  for (const [name, file] of [
+    ['idle1', 'idle1.motion3.json'],
+    ['idle1', 'motions/idle1.motion3.json?v=content'],
+    ['think1', '/avatar_models/Host/think1.motion3.json?v=content#motion'],
+    ['talk one', '/avatar_models/Host/talk%20one.motion3.json?v=content'],
+  ]) {
+    const calls = [];
+    const definitions = { Idle: [{ File: 'other.motion3.json' }, { File: file }] };
+    const agent = { model: { internalModel: { motionManager: { definitions } }, motion: (...args) => calls.push(args) } };
+    const { agentPlay } = await engineFunctions(['agentPlay'], { agent });
+    assert.equal(agentPlay(name), true, file);
+    assert.deepEqual(calls, [['Idle', 1, 3]]);
+    assert.equal(agent.lastMotion, name);
+    assert.equal(definitions.Idle[1].File, file, 'keep cache version for the actual request');
+    assert.equal(agentPlay('missing'), false);
+  }
+});
+
+test('versioned expressions use the expression manager and retain the missing-definition fallback', async () => {
+  for (const file of ['smile.exp3.json', 'expressions/smile.exp3.json?v=content',
+    '/avatar_models/Amika/smile.exp3.json?v=content#expression']) {
+    const managed = [], fallback = [], activeExpressions = new Set();
+    const asset = { name: 'smile', file: 'smile.exp3.json', path: '/avatar_models/Amika/smile.exp3.json?v=content' };
+    const definitions = [{ Name: 'smile', File: file }];
+    const live2dModel = { internalModel: { motionManager: { expressionManager: {
+      definitions, setExpression: index => managed.push(index),
+    } } } };
+    const { activateExpressionByName } = await engineFunctions(['activateExpressionByName'], {
+      expressionAssets: [asset], activeExpressions, live2dModel,
+      applyExpressionFromPath: (...args) => fallback.push(args),
+    });
+    activateExpressionByName('smile');
+    activateExpressionByName('smile');
+    assert.deepEqual(managed, [0], file + ' uses library fading/blending once');
+    assert.deepEqual(fallback, []);
+    assert.equal(definitions[0].File, file);
+    activeExpressions.clear(); definitions.length = 0;
+    activateExpressionByName('smile');
+    assert.deepEqual(fallback, [[asset.path, asset.file]], 'unknown definitions still use the original fallback URL');
+  }
+});
+
+test('avatar loading shows each stage without blocking controls or shifting the layout', async t => {
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 412, height: 915 }]) {
+    const p = await open(t, viewport, 1, false, { pendingAvatar: true });
+    const loading = p.locator('#avatarLoading');
+    assert.equal(await loading.isVisible(), true);
+    assert.equal(await p.locator('#avatarLoadingText').textContent(), 'Loading avatar…');
+    const before = await p.locator('#stageArea').boundingBox();
+    await p.locator('#sayInput').fill('Keep this while she loads');
+    await p.locator('#lockBtn').click();
+    await pressed(p, 'lockBtn', true);
+    await p.evaluate(() => fixture.avatarOptions.onProgress(40));
+    assert.equal(await p.locator('#avatarLoadingText').textContent(), 'Downloading avatar…');
+    await p.evaluate(() => fixture.avatarOptions.onProgress(90));
+    assert.equal(await p.locator('#avatarLoadingText').textContent(), 'Preparing avatar…');
+    await p.emulateMedia({ reducedMotion: 'reduce' });
+    assert.equal(await p.locator('.u-avatar-spinner').evaluate(e => getComputedStyle(e).animationName), 'none');
+    await p.evaluate(() => fixture.completeAvatar({ ok: true }));
+    await loading.waitFor({ state: 'hidden' });
+    assert.deepEqual(await p.locator('#stageArea').boundingBox(), before);
+    assert.equal(await p.locator('#sayInput').inputValue(), 'Keep this while she loads');
+    assert.equal(await p.locator('#stageEmpty').isHidden(), true);
+  }
+});
+
+test('avatar loading ends for missing models, failed requests and rejected initialization', async t => {
+  const empty = await open(t);
+  assert.equal(await empty.locator('#avatarLoading').isHidden(), true);
+  assert.equal(await empty.locator('#stageEmpty .big').textContent(), 'No Live2D model yet');
+  for (const failure of ['registry', 'load-failed', 'rejection']) {
+    const p = await open(t, undefined, 1, false, { pendingAvatar: true });
+    await p.evaluate(reason => reason === 'rejection' ? fixture.failAvatar(new Error('fixture startup failure'))
+      : fixture.completeAvatar({ ok: false, reason }), failure);
+    await p.locator('#avatarLoading').waitFor({ state: 'hidden' });
+    assert.equal(await p.locator('#stageEmpty .big').textContent(), "Avatar couldn't load");
+    assert.equal(await p.locator('#stageEmpty').isVisible(), true);
+  }
+});
 
 test('scene, expand menu, and transcript dismiss with focus restored; draft text survives', async t => {
   const p = await open(t);

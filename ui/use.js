@@ -129,6 +129,11 @@
       canvas: $("stageCanvas"),
       area: $("stageArea"),
       fixed: PET,                                 // the pet: she always fills her window, no drag/zoom of the model
+      onProgress: (step) => {
+        // These are loading stages, not measured download percentages.
+        $("avatarLoadingText").textContent = step >= 80 ? "Preparing avatar…"
+          : step >= 40 ? "Downloading avatar…" : "Loading avatar…";
+      },
       onChunkStart: (meta, emotion) => {
         if (meta && meta.kind === "wizard") { if (meta.onstart) meta.onstart(); return; }   // her wizard lines: no turn bookkeeping
         const kind = (meta && meta.kind) || null;
@@ -156,13 +161,17 @@
         }
       },
       onQueueEmpty: () => {},
-    });
+    }).catch((error) => {
+      console.warn("[avatar] startup failed:", error);
+      return { ok: false, reason: "load-failed" };
+    }).finally(() => { $("avatarLoading").hidden = true; });
     avatarReady = !!result.ok;
     syncBusy();
     if (!result.ok) {
       $("stageEmpty").hidden = false;
-      if (result.reason === "load-failed") {
-        $("stageEmpty").querySelector(".big").textContent = "Model failed to load";
+      if (result.reason !== "no-models") {
+        $("stageEmpty").querySelector(".big").textContent = "Avatar couldn't load";
+        $("stageEmpty").lastElementChild.textContent = "Reload the page to try again.";
       }
       return;
     }

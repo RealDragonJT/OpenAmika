@@ -330,6 +330,13 @@
     repositionAgent();
   }
 
+  function assetFilename(url) {
+    if (typeof url !== "string") return "";
+    const file = url.split(/[?#]/, 1)[0].split("/").pop();
+    // Compare filenames, but leave the original versioned URL intact for the loader.
+    try { return decodeURIComponent(file); } catch (_) { return file; }
+  }
+
   async function injectExternalMotions(motionManager, opt) {
     if (!motionManager || !motionManager.definitions) return;
     const groups = Object.keys(motionManager.definitions);
@@ -338,13 +345,13 @@
     if (!Array.isArray(gm)) return;
     try {
       const list = await (await fetch(opt.motions_url)).json();
-      const existing = new Set(gm.map((m) => (m && m.File && m.File.split("/").pop()) || (m && m.File)).filter(Boolean));
+      const existing = new Set(gm.map((m) => assetFilename(m && m.File)).filter(Boolean));
       let added = 0;
       for (const item of list) {
         if (item.type === "expression") continue;
-        const fn = item.file || (item.path && item.path.split("/").pop());
+        const fn = item.file || assetFilename(item.path);
         if (!fn || !fn.endsWith(".motion3.json") || existing.has(fn)) continue;
-        gm.push({ File: fn, FadeInTime: 0.5, FadeOutTime: 0.5 });
+        gm.push({ File: item.path || fn, FadeInTime: 0.5, FadeOutTime: 0.5 });
         existing.add(fn); added++;
       }
       if (added) console.info(`[Live2D] injected ${added} external motion(s)`);
@@ -479,7 +486,7 @@
     if (!internal) return;
     if (internal.motionManager && internal.motionManager.expressionManager) {
       const defs = internal.motionManager.expressionManager.definitions;
-      const idx = defs.findIndex((d) => d.File === fn || d.Name === fn || (d.File && d.File.endsWith(fn)));
+      const idx = defs.findIndex((d) => d.Name === fn || assetFilename(d.File) === fn);
       if (idx >= 0) {
         internal.motionManager.expressionManager.setExpression(idx);
         activeExpressions.add(fn);
@@ -1111,10 +1118,7 @@
     const groups = Object.keys(mm.definitions || {});
     if (!groups.length) return false;
     const g = groups[0], defs = mm.definitions[g] || [];
-    const idx = defs.findIndex((d) => {
-      const f = d.File || "";
-      return f === name + ".motion3.json" || f.endsWith("/" + name + ".motion3.json");
-    });
+    const idx = defs.findIndex((d) => assetFilename(d.File) === name + ".motion3.json");
     if (idx < 0) return false;
     m.motion(g, idx, 3);
     agent.lastMotion = name;

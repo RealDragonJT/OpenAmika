@@ -76,6 +76,18 @@ html:has(body.use-page) { background: #0e0a12; }
               linear-gradient(to bottom, rgba(14, 10, 18, .5), transparent 20%);
 }
 .u-stage .stage-empty { z-index: 2; }
+.u-avatar-loading {
+  position: absolute; inset: 0; z-index: 3; pointer-events: none;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  color: var(--u-muted); font-size: 13px; font-weight: 500;
+}
+.u-avatar-spinner {
+  width: 24px; height: 24px; box-sizing: border-box; border-radius: 50%;
+  border: 2px solid var(--u-accent-soft); border-top-color: var(--u-accent);
+  animation: u-avatar-spin .9s linear infinite;
+}
+@keyframes u-avatar-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .u-avatar-spinner { animation: none; } }
 .u-stage .bubble { z-index: 4; }
 
 .u-glass { background: var(--u-glass); border: 1px solid var(--u-glass-line); backdrop-filter: blur(14px) saturate(1.2); -webkit-backdrop-filter: blur(14px) saturate(1.2); }
@@ -287,6 +299,11 @@ html.pet .u-main { display: none; }
 html.pet .u-stage {
   position: fixed; inset: 0; width: auto; height: auto; min-height: 0;
   border: 0; border-radius: 0; background: transparent;
+}
+html.pet .u-avatar-loading {
+  inset: 50% auto auto 50%; transform: translate(-50%, -50%);
+  width: max-content; max-width: 100%; box-sizing: border-box; gap: 8px; padding: 12px 8px;
+  background: rgba(14, 10, 18, .9); border-radius: 12px; text-align: center;
 }
 html.pet .u-vignette, html.pet .u-stage-cam, html.pet .u-top, html.pet .u-dock,
 html.pet .u-panel, html.pet .u-menu, html.pet .u-drawer, html.pet .u-pip,
