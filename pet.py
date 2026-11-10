@@ -335,12 +335,14 @@ class PetApi:
     """What her page may ask of its window (window.pywebview.api in ui/use.js): zoom, full_page, close, handover.
     pywebview exposes the public methods only; the window and its handle are filled in when it exists."""
 
-    def __init__(self, base: str, power: bool = False, mic: bool = False, on_ready=None, audio=None):
+    def __init__(self, base: str, power: bool = False, mic: bool = False, on_ready=None, audio=None, voice_output=None):
         self._base = base
         self._window = None
         self._hwnd = None
         self._open_page = False
         self._handover = {'power': bool(power), 'mic': bool(mic)}
+        if voice_output is not None:
+            self._handover['voice_output'] = voice_output
         if audio is not None:
             self._handover['audio'] = audio
         self._needs_audio = audio is not None
@@ -356,6 +358,8 @@ class PetApi:
         (on_ready). An audio-device transfer waits for handover_done() instead."""
         with self._lock:
             state, self._handover = self._handover, {'power': False, 'mic': False}
+            if 'voice_output' in state:          # a reload must not silently unmute her when power is enabled later
+                self._handover['voice_output'] = state['voice_output']
         if 'audio' in state:
             try:
                 if self._audio_permission is not None:
@@ -464,6 +468,8 @@ def main(argv=None) -> int:
     ap.add_argument('--debug', action='store_true', help="pywebview's debug mode: developer tools, context menu")
     ap.add_argument('--power', action='store_true', help='she was on in the page that sent her here: switch her on')
     ap.add_argument('--mic', action='store_true', help='the microphone was on there too: switch it on as well')
+    ap.add_argument('--voice-output', action=argparse.BooleanOptionalAction, default=None,
+                    help='preserve whether spoken replies were enabled in the page')
     ap.add_argument('--close-with', type=int, metavar='PID', help='close the window when this process ends')
     args = ap.parse_args(argv)
     if os.name != 'nt':
@@ -500,7 +506,8 @@ def main(argv=None) -> int:
         print('Invalid desktop audio selections.', file=sys.stderr)
         release(handles)
         return 2
-    api = PetApi(base, power=args.power, mic=args.mic, audio=audio, on_ready=lambda: handles.append(page_alive(name)))
+    api = PetApi(base, power=args.power, mic=args.mic, audio=audio, voice_output=args.voice_output,
+                 on_ready=lambda: handles.append(page_alive(name)))
     window = webview.create_window(TITLE, pet_url(base), js_api=api, x=geo['x'], y=geo['y'], width=geo['width'],
                                    height=geo['height'], frameless=True, transparent=True, on_top=True, easy_drag=False,
                                    shadow=False, min_size=MIN_SIZE, background_color='#000000', text_select=False,

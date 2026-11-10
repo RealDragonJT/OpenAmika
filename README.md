@@ -345,6 +345,10 @@ programs, with her voice, lip-sync and expressions as on the Use page. Windows o
 The button shows only in a browser on the PC that runs her (her window opens on that PC's desktop), so not on your
 phone.
 
+If **Voice output** is off, she asks before moving: **Enable and move** turns spoken replies on for the pet;
+**Cancel** leaves the browser session untouched. A failed move keeps the previous voice setting. After a successful
+move, spoken replies stay enabled when you bring her back to the browser.
+
 The microphone and audio output selected in the web page carry over to her desktop window. Hover the microphone
 for its input name, or power for the output name. If a named device is unavailable or ambiguous, the move fails
 and the browser session is restored. System default stays System default. The webcam switches off after a

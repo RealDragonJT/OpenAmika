@@ -928,7 +928,7 @@ depends on it, and it adds no feature of its own: same page, same dialog socket,
   also has `running`, `installed` (pywebview in the window's Python: `AMIKA_PET_PYTHON`, which the launcher sets to
   its own Python, else `brain_python`, else `envs\brain\Scripts\python.exe`) and `session` (`"pet"`, `"page"` or
   null: who holds the dialog session). `POST /api/pet/open` (`X-Build-F-Action: open-pet`, body `{"power": bool,
-  "mic": bool, "audio": {"mic": "device label or empty for default", "speaker": "device label or empty for default"}}`),
+  "mic": bool, "voice_output": bool, "audio": {"mic": "device label or empty for default", "speaker": "device label or empty for default"}}`),
   `/api/pet/close` (`close-pet`) and `/api/pet/install` (`install-pet`: pip installs
   `brain\requirements-pet.txt` into that Python, output in `logs/pet-install.log`) have the same origin and action
   guards as the other controls plus the local rule (403 `Her desktop window can only be opened from this PC
@@ -940,7 +940,12 @@ depends on it, and it adds no feature of its own: same page, same dialog socket,
     event while its window lives (`Local\OpenAmika-pet-<16 hex digits of the SHA-1 of the install folder>`): the
     event exists = her window is open; setting it closes the window (that is `close`, the tab's **Bring her back
     here**). A second event, `<name>-ready`, appears when her page in the window has called
-    `window.pywebview.api.handover()`, which answers `{power, mic, audio?}` once. Audio labels travel through the
+    `window.pywebview.api.handover()`, which answers `{power, mic, voice_output?, audio?}`. Power, microphone and
+    audio selection transfer once; the voice-output choice also survives a native page reload. A muted web page
+    first asks to enable spoken replies. Cancel keeps its media and draft untouched; acceptance passes
+    `voice_output: true` through `--voice-output` before the pet connects. Only a successful move updates the web
+    toggle, so a failure restores the muted session and a successful return retains the accepted choice.
+    Audio labels travel through the
     child's `AMIKA_PET_AUDIO` environment variable; IDs are profile-specific. WebView2 grants host microphone
     permission without capture so device enumeration works even with the mic off. The page requires a unique
     label match, applies its own input/output IDs, and calls `handover_done()` after routing succeeds. Missing or

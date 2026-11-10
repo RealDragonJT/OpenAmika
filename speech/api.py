@@ -4690,12 +4690,15 @@ async def pet_state(request: Request):
 
 @app.post("/api/pet/open")
 async def pet_open(request: Request):
-    """Open her desktop window. Body {power, mic}: what the page had on. The page has closed its own dialog socket
-    first; her window switches the same on (pet.py --power --mic), so she goes on talking there."""
+    """Open her desktop window with the page's power, mic, voice_output and audio selections.
+    The page has closed its own dialog socket first; her window takes over the same settings."""
     global _pet_busy
     _pet_guard(request, "open-pet")
     payload = await _pet_json(request)
     power, mic = payload.get("power") is True, payload.get("mic") is True
+    voice_output = payload.get("voice_output")
+    if "voice_output" in payload and not isinstance(voice_output, bool):
+        raise HTTPException(status_code=400, detail="Voice output must be a boolean.")
     audio = payload.get("audio")
     if audio is not None and (not isinstance(audio, dict) or set(audio) != {"mic", "speaker"}
                               or any(not isinstance(v, str) or len(v) > 256 for v in audio.values())):
@@ -4707,7 +4710,7 @@ async def pet_open(request: Request):
         if power:
             await _pet_session_gone(3)                   # the page's socket is on its way out
         if pet_window.running():
-            if not power and audio is None:
+            if not power and audio is None and voice_output is None:
                 return {"ok": True, "already": True}
             # a window is open already and does not hold her session: a new one takes the session over
             closed = await asyncio.to_thread(pet_window.close)
@@ -4717,6 +4720,8 @@ async def pet_open(request: Request):
         # her own address from the launcher, never the request's Host header
         base = os.getenv("AMIKA_CHAT_URL") or f"http://localhost:{os.getenv('YUMEHA_PORT', '53000')}"
         options = {"power": power, "mic": mic}
+        if voice_output is not None:
+            options["voice_output"] = voice_output
         if audio is not None:
             options["audio"] = audio
         return await asyncio.to_thread(pet_window.start, base, **options)

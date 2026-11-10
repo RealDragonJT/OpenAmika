@@ -160,6 +160,12 @@ class HandoverTests(unittest.TestCase):
         api.handover_done()
         self.assertEqual(ready, [1])
 
+    def test_voice_output_choice_survives_handover_and_page_reload(self):
+        for voice_output in (False, True):
+            api = pet.PetApi("http://localhost:53000", power=True, voice_output=voice_output)
+            self.assertEqual(api.handover(), {"power": True, "mic": False, "voice_output": voice_output})
+            self.assertEqual(api.handover(), {"power": False, "mic": False, "voice_output": voice_output})
+
     def test_audio_failure_closes_without_reporting_ready(self):
         ready = []
         api = pet.PetApi("http://localhost:53000", audio={"mic": "Missing mic", "speaker": ""}, on_ready=lambda: ready.append(1))
@@ -358,6 +364,12 @@ class StartTests(unittest.TestCase):
         self.assertEqual(self.seen()["argv"], ["--url", "http://localhost:53000", "--close-with", str(os.getpid())])
         self.assertTrue(pw.close(self.name, wait=20)["ok"])
 
+    def test_voice_output_choice_reaches_the_child(self):
+        for voice_output, flag in ((False, "--no-voice-output"), (True, "--voice-output")):
+            self.assertEqual(self.start("opens", voice_output=voice_output), {"ok": True})
+            self.assertIn(flag, self.seen()["argv"])
+            self.assertTrue(pw.close(self.name, wait=20)["ok"])
+
     def test_audio_labels_cross_to_the_child_without_entering_its_address_or_log(self):
         audio = {"mic": "マイク USB", "speaker": "Headphones"}
         self.assertEqual(self.start("opens", audio=audio), {"ok": True})
@@ -550,8 +562,9 @@ class Window:
     def running(self):
         return self.open
 
-    def start(self, base, power=False, mic=False, audio=None):
+    def start(self, base, power=False, mic=False, audio=None, voice_output=None):
         self.audio = audio
+        self.voice_output = voice_output
         self.calls.append(("start", base, power, mic, self.ns["_dialog_active"]))
         self.open = bool(self.start_answer.get("ok"))
         return dict(self.start_answer)
@@ -688,6 +701,19 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         for audio in ([], "speaker", {}, {"mic": 1, "speaker": ""}, {"mic": "", "speaker": "x" * 257},
                       {"mic": "", "speaker": "", "camera": "camera"}):
             await self.refused("pet_open", Ask("open-pet", {"audio": audio}), 400, "Audio selections")
+
+    async def test_voice_output_transfers_even_when_power_is_off(self):
+        for voice_output in (False, True):
+            self.window.open = True
+            self.window.calls.clear()
+            self.assertEqual(await self.ns["pet_open"](Ask("open-pet", {"voice_output": voice_output})), {"ok": True})
+            self.assertIs(self.window.voice_output, voice_output)
+            self.assertEqual([call[0] for call in self.window.calls], ["close", "start"])
+
+    async def test_voice_output_requires_a_boolean(self):
+        for voice_output in (None, 0, 1, "false", "true", [], {}):
+            await self.refused("pet_open", Ask("open-pet", {"voice_output": voice_output}), 400, "Voice output")
+        self.assertEqual(self.window.calls, [])
 
     async def test_only_a_plain_true_switches_anything_on(self):
         for body in ({"power": 1, "mic": "yes"}, {"power": "true"}, {}, b""):

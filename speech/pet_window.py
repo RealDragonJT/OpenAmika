@@ -194,12 +194,13 @@ def _failed(reason, code='failed') -> dict:
     return {'ok': False, 'code': code, 'reason': reason}
 
 
-def start(base_url, *, power=False, mic=False, audio=None, python=None, script=PET, name=None, wait=25.0, log=LOG) -> dict:
+def start(base_url, *, power=False, mic=False, audio=None, voice_output=None, python=None, script=PET, name=None, wait=25.0, log=LOG) -> dict:
     """Open her window (pet.py --url base_url) and wait until her page is alive in it.
 
     power, mic: what the page that sends her there had on; her window's page takes both over once (pet.py
     PetApi.handover: no click is needed there, and nothing travels in the address). Optional audio labels travel
     in the child's environment; readiness then waits for the page to resolve and apply its own device IDs.
+    voice_output preserves the page's spoken-reply setting before the pet connects.
     Returns {'ok': True} ('already': True when her window was open before), or {'ok': False, 'code', 'reason'} with
     code 'unsupported' (not Windows), 'no_python', 'not_installed' (pywebview is missing: install() adds it),
     'closed' (it opened and went away) or 'failed'."""
@@ -217,6 +218,8 @@ def start(base_url, *, power=False, mic=False, audio=None, python=None, script=P
     command = [str(python), '-X', 'utf8', str(script), '--url', str(base_url), '--close-with', str(os.getpid())]
     command += ['--power'] if power else []
     command += ['--mic'] if mic else []
+    if voice_output is not None:
+        command += ['--voice-output' if voice_output else '--no-voice-output']
     env = os.environ.copy()
     env.pop('AMIKA_PET_AUDIO', None)
     if audio is not None:

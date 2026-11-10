@@ -217,9 +217,12 @@
   // the scene panel and the expand menu are popovers off the stage tools: one open at a time, closed by a tap on the
   // stage or Escape
   function closePopovers() {
+    const voiceFocused = $("petVoice").contains(document.activeElement);
     $("expandMenu").hidden = true; $("fsBtn").setAttribute("aria-expanded", "false");
     $("scenePanel").hidden = true; $("sceneBtn").setAttribute("aria-expanded", "false");
     $("petSetup").hidden = true;
+    $("petVoice").hidden = true;
+    if (voiceFocused) $("fsBtn").focus();
   }
   $("sceneBtn").addEventListener("click", () => {
     const open = $("scenePanel").hidden;
@@ -591,7 +594,7 @@
     if ((donateModal && !donateModal.hidden) || document.querySelector(".oa-wizard-backdrop")) return;
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
     if (key === "Escape") {
-      if (!$("expandMenu").hidden || !$("scenePanel").hidden || !$("petSetup").hidden) {
+      if (!$("expandMenu").hidden || !$("scenePanel").hidden || !$("petSetup").hidden || !$("petVoice").hidden) {
         const trigger = !$("scenePanel").hidden ? $("sceneBtn") : $("fsBtn");
         closePopovers(); trigger.focus();
       }
@@ -1024,6 +1027,13 @@ registerProcessor('pcm-pusher', PCMPusher);`;
     else if ($("petSetup").contains(document.activeElement)) $("fsBtn").focus();
   }
 
+  function showPetVoice(open) {
+    if (open) closePopovers();
+    $("petVoice").hidden = !open;
+    if (open) $("petVoiceNo").focus();
+    else if ($("petVoice").contains(document.activeElement)) $("fsBtn").focus();
+  }
+
   function setPetOut(out) {
     if (petOut === out) return;
     petOut = out;
@@ -1069,21 +1079,24 @@ registerProcessor('pcm-pusher', PCMPusher);`;
 
   // this page lets go of her session, her window opens and takes it over; when the window does not come she is back
   // here as she was
-  async function sendToDesktop() {
+  async function sendToDesktop(enableVoice = false) {
+    const voice_output = $("voiceOutToggle").checked || enableVoice;
+    if (!voice_output) { showPetVoice(true); return; }
     let audio;
     try { audio = await audioForPet(); }
     catch (error) { toast(error.message, true); return; }
     const wasOn = wsWanted, wasMic = micActive || micStarting;
-    showPetSetup(false);
+    closePopovers();
     if (bigMode) exitBig();
     petMoving = true;                              // power and the microphone wait here until she has arrived or not
     disconnect();
     setPowerUI("Offline", "opening her desktop window…");
     let result = null, failure = "";
-    try { result = await postAction("/api/pet/open", "open-pet", { power: wasOn, mic: wasMic, audio }); }
+    try { result = await postAction("/api/pet/open", "open-pet", { power: wasOn, mic: wasMic, voice_output, audio }); }
     catch (error) { failure = error.message; }
     petMoving = false;
     if (result && result.ok) {
+      $("voiceOutToggle").checked = voice_output;  // commit the accepted choice only after a successful move
       if (petInfo) petInfo.running = true;
       setPetOut(true);
       return;
@@ -1111,6 +1124,14 @@ registerProcessor('pcm-pusher', PCMPusher);`;
   });
   $("sceneBtn").addEventListener("click", () => showPetSetup(false));
   $("petInstallNo").addEventListener("click", () => showPetSetup(false));
+  $("petVoiceNo").addEventListener("click", () => showPetVoice(false));
+  $("petVoiceYes").addEventListener("click", async () => {
+    if (petWorking || petOut) return;
+    petWorking = true;
+    $("petVoiceYes").disabled = true;
+    try { await sendToDesktop(true); }
+    finally { petWorking = false; $("petVoiceYes").disabled = false; }
+  });
   $("petInstallBtn").addEventListener("click", async () => {
     if (petWorking) return;
     petWorking = true;
@@ -1163,6 +1184,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
       let state = null;
       try { state = await window.pywebview.api.handover(); } catch (_) {}
       if (!state) return;
+      if (typeof state.voice_output === "boolean") $("voiceOutToggle").checked = state.voice_output;
       const previousAudio = state.audio ? { mic: devices.get("mic"), speaker: devices.get("speaker") } : null;
       try {
         if (state.audio_error) throw new Error(state.audio_error);
