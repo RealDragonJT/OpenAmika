@@ -38,6 +38,8 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
           const flush = OpenAmikaAvatar.flush;
           fixture.flushCount = 0;
           OpenAmikaAvatar.flush = () => { fixture.flushCount++; flush(); };
+          const pause = OpenAmikaAvatar.setPaused;
+          OpenAmikaAvatar.setPaused = on => { fixture.paused = on; pause(on); };
         `;
         return route.fulfill({ body, contentType });
       }
@@ -48,15 +50,32 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
       '/api/stage': { blur: 12, background: null },
       '/api/avatar/models': { models: [], emotions: [] },
       '/api/vision': { enabled: true },
+      '/api/pet': options.petInfo || { supported: true, local: false },
     };
     return route.fulfill({ json: fixtures[p] || {} });
   });
-  await page.addInitScript(({ host }) => {
+  await page.addInitScript(({ host, handover, mediaDevices, savedDevices, outputFailure, inputFailure }) => {
     window.fixture = { sockets: [], streams: [], requests: [], pending: [], holdMedia: false, denyMedia: false };
+    for (const [kind, id] of Object.entries(savedDevices || {})) localStorage.setItem('openamika-' + kind + 'Device', id);
+    if (mediaDevices) {
+      navigator.mediaDevices.enumerateDevices = async () => mediaDevices;
+      fixture.sinks = [];
+      const setSink = AudioContext.prototype.setSinkId;
+      AudioContext.prototype.setSinkId = function(id) {
+        fixture.sinks.push(id);
+        if (id && outputFailure) return Promise.reject(new DOMException('Test output refusal', 'NotAllowedError'));
+        return setSink.call(this, '');
+      };
+    }
     if (host) {
       fixture.hostCalls = [];
       window.pywebview = { api: Object.fromEntries(['zoom', 'full_page', 'close'].map(name =>
         [name, (...args) => { fixture.hostCalls.push([name, ...args]); return Promise.resolve(); }])) };
+      if (handover) window.pywebview.api.handover = async () => {
+        fixture.hostCalls.push(['handover']);
+        const state = handover; handover = null; return state;
+      };
+      window.pywebview.api.handover_done = async error => fixture.hostCalls.push(['handover_done', error || null]);
     }
     window.WebSocket = class {
       constructor(url) {
@@ -72,11 +91,17 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
       fixture.requests.push(constraints);
       if (fixture.holdMedia) await new Promise(resolve => fixture.pending.push(resolve));
       if (fixture.denyMedia) throw new DOMException('Test permission refusal', 'NotAllowedError');
-      const stream = await get(constraints);
+      if (inputFailure && constraints.audio?.deviceId?.exact) throw new DOMException('Test disconnected input', 'OverconstrainedError');
+      let actual = constraints;
+      if (mediaDevices?.some(d => d.kind === 'audioinput' && d.deviceId === constraints.audio?.deviceId?.exact)) {
+        actual = { ...constraints, audio: { ...constraints.audio } }; delete actual.audio.deviceId;
+      }
+      const stream = await get(actual);
       fixture.streams.push(stream);
       return stream;
     };
-  }, { host: !!options.host });
+  }, { host: !!options.host, handover: options.handover, mediaDevices: options.mediaDevices,
+    savedDevices: options.savedDevices, outputFailure: options.outputFailure, inputFailure: options.inputFailure });
   await page.goto('http://localhost:53999/use?' + (options.pet ? 'pet=1' : 'kiosk=1'));
   await page.waitForFunction(({ ready, pending }) => window.OA && window.OpenAmikaAvatar &&
     (pending ? !!fixture.avatarOptions : ready ? Array.isArray(fixture.busyHistory) && fixture.busyHistory.length
@@ -196,6 +221,301 @@ test('avatar loading ends for missing models, failed requests and rejected initi
     assert.equal(await p.locator('#stageEmpty .big').textContent(), "Avatar couldn't load");
     assert.equal(await p.locator('#stageEmpty').isVisible(), true);
   }
+});
+
+const localPet = { supported: true, local: true, installed: true, running: false };
+
+test('muted handoff asks first, restores mute on failure, then enables approved spoken replies', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: localPet });
+  await p.locator('#t-set').click(); await p.locator('#voiceOutToggle').uncheck();
+  let success = false, payload, calls = 0;
+  await p.route('**/api/pet/open', route => {
+    calls++;
+    payload = route.request().postDataJSON();
+    return route.fulfill({ json: { ok: success, reason: 'Window failed' } });
+  });
+  await p.route('**/api/pet/close', route => route.fulfill({ json: { ok: true, had_session: true } }));
+  await p.locator('#powerBtn').click(); await pressed(p, 'powerBtn', true);
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petVoice').waitFor({ state: 'visible' });
+  assert.equal(calls, 0);
+  await pressed(p, 'powerBtn', true);
+  await p.locator('#petVoiceYes').click();
+  await p.waitForFunction(() => fixture.sockets.filter(s => s.url.includes('/ws/dialog')).length === 2 && !petBtn.disabled);
+  assert.equal(payload.voice_output, true, 'spoken replies are enabled only after acceptance');
+  assert.equal(await p.locator('#voiceOutToggle').isChecked(), false);
+  await p.waitForFunction(() => fixture.sockets.filter(s => s.url.includes('/ws/dialog')).at(-1).sent.length);
+  assert.equal(await p.evaluate(() => JSON.parse(fixture.sockets.filter(s => s.url.includes('/ws/dialog')).at(-1).sent[0]).voice_output), false);
+  success = true;
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petVoice').waitFor({ state: 'visible' });
+  await p.locator('#petVoiceYes').click();
+  await p.locator('#petAway').waitFor({ state: 'visible' });
+  assert.equal(calls, 2);
+  assert.equal(await p.locator('#voiceOutToggle').isChecked(), true);
+  const pet = await open(t, undefined, 1, true, { pet: true, host: true, handover: payload });
+  await pet.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'handover_done'));
+  await pressed(pet, 'powerBtn', true);
+  await pet.locator('#powerBtn').click(); await pressed(pet, 'powerBtn', false);
+  await pet.locator('#powerBtn').click(); await pressed(pet, 'powerBtn', true);
+  await p.locator('#petBackBtn').click(); await p.locator('#petAway').waitFor({ state: 'hidden' });
+  await pressed(p, 'powerBtn', true);
+  for (const page of [p, pet]) {
+    await page.waitForFunction(() => fixture.sockets.filter(s => s.url.includes('/ws/dialog')).at(-1).sent.length);
+    const settings = await page.evaluate(() => fixture.sockets.filter(s => s.url.includes('/ws/dialog'))
+      .flatMap(s => s.sent.filter(v => typeof v === 'string').map(JSON.parse)).filter(v => v.type === 'settings'));
+    assert.ok(settings.length >= 2);
+    assert.equal(settings.at(-1).voice_output, true, 'the accepted choice survives reconnect and return');
+    if (page === pet) assert.ok(settings.every(s => s.voice_output === true));
+  }
+});
+
+test('cancel, Escape and outside dismissal leave muted web media and draft untouched', async t => {
+  for (const width of [1440, 412]) {
+    const p = await open(t, { width, height: 915 }, 1, true, { petInfo: localPet });
+    await p.locator('#t-set').click(); await p.locator('#voiceOutToggle').uncheck();
+    let calls = 0;
+    await p.route('**/api/pet/open', route => { calls++; return route.fulfill({ json: { ok: true } }); });
+    await p.locator('#powerBtn').click(); await pressed(p, 'powerBtn', true);
+    await p.locator('#micBtn').click(); await pressed(p, 'micBtn', true);
+    await p.locator('#camBtn').click(); await pressed(p, 'camBtn', true);
+    await p.locator('#sayInput').fill('Keep this draft');
+    for (const dismiss of ['cancel', 'escape', 'outside']) {
+      await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+      await p.locator('#petVoice').waitFor({ state: 'visible' });
+      assert.equal(await p.locator('#petVoiceNo').evaluate(el => el === document.activeElement), true);
+      const box = await p.locator('#petVoice').boundingBox();
+      assert.ok(box.x >= 0 && box.x + box.width <= width, 'prompt fits the viewport');
+      if (dismiss === 'cancel') await p.locator('#petVoiceNo').click();
+      else if (dismiss === 'escape') await p.keyboard.press('Escape');
+      else await p.locator('#stageArea').click({ position: { x: 20, y: 300 } });
+      await p.locator('#petVoice').waitFor({ state: 'hidden' });
+      if (dismiss !== 'outside') assert.equal(await p.locator('#fsBtn').evaluate(el => el === document.activeElement), true);
+      assert.equal(await p.locator('#petVoice').evaluate(el => el.contains(document.activeElement)), false);
+      assert.equal(await p.locator('#voiceOutToggle').isChecked(), false);
+      assert.equal(await p.locator('#sayInput').inputValue(), 'Keep this draft');
+      await pressed(p, 'powerBtn', true); await pressed(p, 'micBtn', true); await pressed(p, 'camBtn', true);
+      assert.equal(await p.evaluate(() => fixture.streams.every(s => s.getTracks().every(t => t.readyState === 'live'))), true);
+      assert.equal(calls, 0);
+    }
+    assert.equal(await p.evaluate(() => fixture.sockets.filter(s => s.url.includes('/ws/dialog')).length), 1);
+  }
+});
+
+test('muted handoff asks after installation and ignores repeated confirmation during opening', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: { ...localPet, installed: false } });
+  await p.locator('#t-set').click(); await p.locator('#voiceOutToggle').uncheck();
+  await p.route('**/api/pet/install', route => route.fulfill({ json: { ok: true } }));
+  let calls = 0, finish;
+  await p.route('**/api/pet/open', async route => {
+    calls++; await new Promise(resolve => { finish = resolve; });
+    await route.fulfill({ json: { ok: true } });
+  });
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petInstallBtn').click();
+  await p.locator('#petVoice').waitFor({ state: 'visible' });
+  assert.equal(calls, 0);
+  await p.keyboard.press('Shift+Tab');
+  assert.equal(await p.locator('#petVoiceYes').evaluate(el => el === document.activeElement), true);
+  await p.keyboard.press('Enter');
+  await p.waitForFunction(() => petVoiceYes.disabled);
+  await p.locator('#petVoiceYes').evaluate(el => el.click());
+  await p.waitForFunction(() => powerDetail.textContent.includes('opening'));
+  assert.equal(calls, 1);
+  finish();
+  await p.locator('#petAway').waitFor({ state: 'visible' });
+  assert.equal(await p.locator('#voiceOutToggle').isChecked(), true);
+});
+
+test('idle native handoff retains voice-output choice until power is switched on', async t => {
+  for (const voice_output of [false, true]) {
+    const p = await open(t, undefined, 1, true, { pet: true, host: true,
+      handover: { power: false, mic: false, voice_output, audio: { mic: '', speaker: '' } } });
+    await p.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'handover_done'));
+    assert.equal(await p.locator('#voiceOutToggle').isChecked(), voice_output);
+    await p.locator('#powerBtn').click(); await pressed(p, 'powerBtn', true);
+    await p.waitForFunction(() => fixture.sockets.find(s => s.url.includes('/ws/dialog'))?.sent.length);
+    const first = await p.evaluate(() => JSON.parse(fixture.sockets.find(s => s.url.includes('/ws/dialog')).sent[0]));
+    assert.deepEqual(first, { type: 'settings', voice_output });
+  }
+});
+
+test('desktop pet handoff releases media, retains draft, and returns to the browser', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: localPet });
+  await p.route('**/api/pet/open', async route => {
+    assert.deepEqual(route.request().postDataJSON(), { power: true, mic: true, voice_output: true, audio: { mic: '', speaker: '' } });
+    assert.equal(route.request().headers()['x-build-f-action'], 'open-pet');
+    await route.fulfill({ json: { ok: true } });
+  });
+  await p.route('**/api/pet/close', route => route.fulfill({ json: { ok: true, had_session: true } }));
+  await p.locator('#powerBtn').click(); await pressed(p, 'powerBtn', true);
+  await p.locator('#micBtn').click(); await pressed(p, 'micBtn', true);
+  await p.locator('#camBtn').click(); await pressed(p, 'camBtn', true);
+  await p.locator('#sayInput').fill('Keep my draft');
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petAway').waitFor({ state: 'visible' });
+  await noTracks(p);
+  assert.equal(await p.evaluate(() => fixture.paused), true);
+  assert.equal(await p.locator('#petBackBtn').evaluate(e => e === document.activeElement), true);
+  const count = await p.evaluate(() => fixture.requests.length);
+  await p.keyboard.press('m'); await p.keyboard.press('c');
+  assert.equal(await p.evaluate(() => fixture.requests.length), count);
+  await p.locator('#petBackBtn').click();
+  await p.locator('#petAway').waitFor({ state: 'hidden' });
+  await pressed(p, 'powerBtn', true);
+  assert.equal(await p.evaluate(() => fixture.paused), false);
+  assert.equal(await p.locator('#sayInput').inputValue(), 'Keep my draft');
+  assert.equal(await p.locator('#fsBtn').evaluate(e => e === document.activeElement), true);
+});
+
+test('failed desktop handoff restores the session and mic without losing the draft', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: localPet });
+  await p.route('**/api/pet/open', route => route.fulfill({ json: { ok: false, reason: 'Window failed' } }));
+  await p.locator('#powerBtn').click(); await pressed(p, 'powerBtn', true);
+  await p.locator('#micBtn').click(); await pressed(p, 'micBtn', true);
+  await p.locator('#sayInput').fill('Retry this');
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.waitForFunction(() => fixture.sockets.filter(s => s.url.includes('/ws/dialog')).length === 2);
+  await pressed(p, 'micBtn', true); await pressed(p, 'powerBtn', true);
+  assert.equal(await p.locator('#petAway').isHidden(), true);
+  assert.equal(await p.locator('#sayInput').inputValue(), 'Retry this');
+  await p.locator('#powerBtn').click(); await noTracks(p);
+});
+
+test('returning from the pet retries failures and notices when its native window closes', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: { ...localPet, running: true } });
+  await p.locator('#petAway').waitFor({ state: 'visible' });
+  let attempts = 0;
+  await p.route('**/api/pet/close', route => route.fulfill({ json: ++attempts === 1
+    ? { ok: false, reason: 'Window could not close' } : { ok: true, had_session: false } }));
+  await p.locator('#petBackBtn').click();
+  await p.waitForFunction(() => !petBackBtn.disabled);
+  assert.equal(await p.locator('#petAway').isVisible(), true);
+  assert.equal(await p.evaluate(() => fixture.paused), true);
+  await p.locator('#petBackBtn').click();
+  await p.locator('#petAway').waitFor({ state: 'hidden' });
+  assert.equal(attempts, 2);
+  assert.equal(await p.evaluate(() => fixture.paused), false);
+  await pressed(p, 'powerBtn', false);
+
+  const external = await open(t, undefined, 1, true, { petInfo: { ...localPet, running: true } });
+  await external.locator('#petAway').waitFor({ state: 'visible' });
+  await external.route('**/api/pet', route => route.fulfill({ json: localPet }));
+  await external.locator('#petAway').waitFor({ state: 'hidden' });
+  assert.equal(await external.evaluate(() => fixture.paused), false);
+  assert.equal(await external.locator('#fsBtn').evaluate(e => !e.closest('[inert]')), true);
+  await external.locator('#powerBtn').click(); await pressed(external, 'powerBtn', true);
+});
+
+test('desktop pet setup dismisses and retries; remote pages do not expose host controls', async t => {
+  const remote = await open(t, { width: 412, height: 915 }, 1, true);
+  await remote.locator('#fsBtn').click();
+  assert.equal(await remote.locator('#petBtn').isHidden(), true);
+  const p = await open(t, { width: 412, height: 915 }, 1, true, { petInfo: { ...localPet, installed: false } });
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petSetup').waitFor({ state: 'visible' });
+  assert.equal(await p.locator('#petInstallBtn').evaluate(e => e === document.activeElement), true);
+  await p.keyboard.press('Escape');
+  assert.equal(await p.locator('#petSetup').isHidden(), true);
+  assert.equal(await p.locator('#fsBtn').evaluate(e => e === document.activeElement), true);
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.route('**/api/pet/install', route => route.fulfill({ json: { ok: false, reason: 'Install failed' } }));
+  await p.locator('#petInstallBtn').click();
+  await p.waitForFunction(() => !petInstallBtn.disabled && petInstallBtn.textContent === 'Install and open');
+  assert.equal(await p.locator('#petSetup').isVisible(), true);
+  await p.locator('#petInstallNo').click();
+  assert.equal(await p.locator('#petSetup').isHidden(), true);
+});
+
+test('native pet handover takes over power and microphone once with a pet-owned socket', async t => {
+  const p = await open(t, { width: 320, height: 560 }, 1, true,
+    { pet: true, host: true, handover: { power: true, mic: true } });
+  await pressed(p, 'powerBtn', true); await pressed(p, 'micBtn', true);
+  assert.equal(await p.evaluate(() => fixture.sockets.find(s => s.url.includes('/ws/dialog')).url.endsWith('?pet=1')), true);
+  assert.equal(await p.evaluate(() => fixture.hostCalls.filter(c => c[0] === 'handover').length), 1);
+  await p.locator('#powerBtn').click(); await noTracks(p);
+});
+
+const petAudioDevices = [
+  { kind: 'audioinput', deviceId: 'native-mic', label: 'USB microphone' },
+  { kind: 'audiooutput', deviceId: 'native-speaker', label: 'Headphones' },
+];
+
+test('web handoff sends device names rather than browser-specific IDs', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: localPet,
+    mediaDevices: petAudioDevices.map(d => ({ ...d, deviceId: d.deviceId.replace('native-', 'web-') })),
+    savedDevices: { mic: 'web-mic', speaker: 'web-speaker' } });
+  let received;
+  await p.route('**/api/pet/open', route => { received = route.request().postDataJSON(); return route.fulfill({ json: { ok: true } }); });
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petAway').waitFor({ state: 'visible' });
+  assert.deepEqual(received, { power: false, mic: false, voice_output: true, audio: { mic: 'USB microphone', speaker: 'Headphones' } });
+});
+
+test('native handoff resolves different device IDs before microphone capture and output', async t => {
+  const p = await open(t, undefined, 1, true, { pet: true, host: true, mediaDevices: petAudioDevices,
+    savedDevices: { mic: 'old-native-mic', speaker: 'old-native-speaker' },
+    handover: { power: true, mic: true, audio: { mic: 'USB microphone', speaker: 'Headphones' } } });
+  await p.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'handover_done'));
+  assert.deepEqual(await p.evaluate(() => [OA.devices.get('mic'), OA.devices.get('speaker')]), ['native-mic', 'native-speaker']);
+  assert.equal(await p.evaluate(() => fixture.requests[0].audio.deviceId.exact), 'native-mic');
+  assert.equal(await p.evaluate(() => fixture.sinks.at(-1)), 'native-speaker');
+  assert.deepEqual(await p.evaluate(() => fixture.hostCalls.find(c => c[0] === 'handover_done')), ['handover_done', null]);
+  assert.match(await p.locator('#powerBtn').getAttribute('title'), /Headphones/);
+  await p.locator('#powerBtn').click(); await noTracks(p);
+});
+
+test('audio selection with the microphone off never opens a capture stream', async t => {
+  const p = await open(t, undefined, 1, true, { pet: true, host: true, mediaDevices: petAudioDevices,
+    handover: { power: false, mic: false, audio: { mic: 'USB microphone', speaker: 'Headphones' } } });
+  await p.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'handover_done'));
+  assert.equal(await p.evaluate(() => fixture.requests.length), 0);
+  assert.equal(await p.evaluate(() => fixture.sinks.at(-1)), 'native-speaker');
+  await pressed(p, 'micBtn', false); await pressed(p, 'powerBtn', false);
+});
+
+test('system-default handoff clears stale pet selections', async t => {
+  const p = await open(t, undefined, 1, true, { pet: true, host: true, mediaDevices: petAudioDevices,
+    savedDevices: { mic: 'old-mic', speaker: 'old-speaker' },
+    handover: { power: false, mic: false, audio: { mic: '', speaker: '' } } });
+  await p.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'handover_done'));
+  assert.deepEqual(await p.evaluate(() => [OA.devices.get('mic'), OA.devices.get('speaker')]), ['', '']);
+  assert.equal(await p.evaluate(() => fixture.sinks.at(-1)), '');
+  assert.equal(await p.evaluate(() => fixture.requests.length), 0);
+});
+
+test('missing or ambiguous devices and output failures reject the native handoff', async t => {
+  for (const scenario of ['missing', 'ambiguous', 'output', 'input']) {
+    const p = await open(t, undefined, 1, true, { pet: true, host: true,
+      mediaDevices: scenario === 'missing' ? [] : scenario === 'ambiguous'
+        ? [...petAudioDevices, { ...petAudioDevices[0], deviceId: 'second-mic' }] : petAudioDevices,
+      outputFailure: scenario === 'output', inputFailure: scenario === 'input', savedDevices: { mic: 'previous-mic', speaker: 'previous-speaker' },
+      handover: { power: true, mic: true, audio: { mic: 'USB microphone', speaker: 'Headphones' } } });
+    await p.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'handover_done'));
+    assert.ok(await p.evaluate(() => fixture.hostCalls.find(c => c[0] === 'handover_done')[1]), scenario);
+    assert.equal(await p.evaluate(() => fixture.requests.length), scenario === 'input' ? 1 : 0, scenario + ': no fallback input capture');
+    await noTracks(p);
+    assert.deepEqual(await p.evaluate(() => [OA.devices.get('mic'), OA.devices.get('speaker')]), ['previous-mic', 'previous-speaker']);
+    await pressed(p, 'powerBtn', false);
+  }
+});
+
+test('failed pet opening keeps the webcam on; returning from a successful move leaves it off', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: localPet });
+  let success = false;
+  await p.route('**/api/pet/open', route => route.fulfill({ json: { ok: success, reason: 'Audio device unavailable' } }));
+  await p.route('**/api/pet/close', route => route.fulfill({ json: { ok: true, had_session: false } }));
+  await p.locator('#camBtn').click(); await pressed(p, 'camBtn', true);
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.waitForFunction(() => !petBtn.disabled);
+  await pressed(p, 'camBtn', true);
+  assert.equal(await p.evaluate(() => fixture.streams[0].getVideoTracks()[0].readyState), 'live');
+  success = true;
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petAway').waitFor({ state: 'visible' }); await noTracks(p);
+  await p.locator('#petBackBtn').click(); await p.locator('#petAway').waitFor({ state: 'hidden' });
+  await pressed(p, 'camBtn', false);
+  assert.equal(await p.evaluate(() => fixture.requests.length), 1, 'camera was not reopened on return');
 });
 
 test('scene, expand menu, and transcript dismiss with focus restored; draft text survives', async t => {
