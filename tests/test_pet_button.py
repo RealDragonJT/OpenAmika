@@ -149,6 +149,27 @@ class NameTests(unittest.TestCase):
 
 
 class HandoverTests(unittest.TestCase):
+    def test_audio_selection_waits_for_confirmation(self):
+        ready = []
+        audio = {"mic": "USB microphone", "speaker": "Headphones"}
+        api = pet.PetApi("http://localhost:53000", power=True, audio=audio, on_ready=lambda: ready.append(1))
+        self.assertEqual(api.handover(), {"power": True, "mic": False, "audio": audio})
+        self.assertEqual(api.handover(), {"power": False, "mic": False})
+        self.assertEqual(ready, [])
+        api.handover_done()
+        api.handover_done()
+        self.assertEqual(ready, [1])
+
+    def test_audio_failure_closes_without_reporting_ready(self):
+        ready = []
+        api = pet.PetApi("http://localhost:53000", audio={"mic": "Missing mic", "speaker": ""}, on_ready=lambda: ready.append(1))
+        api._window = mock.Mock()
+        api.handover()
+        with mock.patch.object(sys, "stderr", new=mock.Mock()):
+            api.handover_done("The selected microphone is unavailable.")
+        api._window.destroy.assert_called_once()
+        self.assertEqual(ready, [])
+
     def test_her_page_takes_it_over_once(self):
         ready = []
         api = pet.PetApi("http://localhost:53000", power=True, mic=True, on_ready=lambda: ready.append(1))
@@ -264,7 +285,7 @@ pet = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pet)
 mode, name = os.environ["PET_STUB_MODE"], os.environ["PET_STUB_EVENT"]
 with open(os.environ["PET_STUB_SEEN"], "w", encoding="utf-8") as out:
-    json.dump({"argv": sys.argv[1:], "pid": os.getpid()}, out)
+    json.dump({"argv": sys.argv[1:], "pid": os.getpid(), "audio": os.environ.get("AMIKA_PET_AUDIO")}, out)
 if mode == "missing":
     print("Her desktop pet needs pywebview.")
     sys.exit(2)
@@ -336,6 +357,19 @@ class StartTests(unittest.TestCase):
         self.assertEqual(self.start("opens"), {"ok": True})
         self.assertEqual(self.seen()["argv"], ["--url", "http://localhost:53000", "--close-with", str(os.getpid())])
         self.assertTrue(pw.close(self.name, wait=20)["ok"])
+
+    def test_audio_labels_cross_to_the_child_without_entering_its_address_or_log(self):
+        audio = {"mic": "マイク USB", "speaker": "Headphones"}
+        self.assertEqual(self.start("opens", audio=audio), {"ok": True})
+        self.assertEqual(json.loads(self.seen()["audio"]), audio)
+        self.assertNotIn("Headphones", " ".join(self.seen()["argv"]))
+        self.assertNotIn("Headphones", self.log.read_text("utf-8"))
+        self.assertTrue(pw.close(self.name, wait=20)["ok"])
+
+    def test_unconfirmed_audio_does_not_count_as_success(self):
+        result = self.start("slow", audio={"mic": "", "speaker": ""}, wait=1.0)
+        self.assertFalse(result["ok"])
+        self.assertFalse(pw.running(self.name))
 
     def test_a_window_that_does_not_listen_is_stopped(self):
         self.assertEqual(self.start("deaf"), {"ok": True})
@@ -516,7 +550,8 @@ class Window:
     def running(self):
         return self.open
 
-    def start(self, base, power=False, mic=False):
+    def start(self, base, power=False, mic=False, audio=None):
+        self.audio = audio
         self.calls.append(("start", base, power, mic, self.ns["_dialog_active"]))
         self.open = bool(self.start_answer.get("ok"))
         return dict(self.start_answer)
@@ -632,7 +667,7 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
             await self.refused(route, Ask(action, origin="http://evil.example"), 403, "Use the OpenAmika page")
             await self.refused(route, Ask(action, origin="http://127.0.0.1:53000"), 403, "Use the OpenAmika page")
             await self.refused(route, Ask(action, content_type="text/plain"), 415, "JSON")
-            await self.refused(route, Ask(action, body=b"x" * 1025), 400, "too large")
+            await self.refused(route, Ask(action, body=b"x" * 4097), 400, "too large")
             await self.refused(route, Ask(action, body=b"{"), 400, "Invalid JSON")
             await self.refused(route, Ask(action, body=b"[]"), 400, "JSON object")
         self.assertFalse(self.ns["_pet_busy"])
@@ -641,6 +676,18 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.ns["pet_open"](Ask("open-pet", {"power": True, "mic": True})), {"ok": True})
         self.assertEqual(self.window.calls, [("start", "http://localhost:53010", True, True, False)])
         self.assertFalse(self.ns["_pet_busy"])
+
+    async def test_open_transfers_audio_labels_and_replaces_an_idle_window(self):
+        self.window.open = True
+        audio = {"mic": "マイク " * 60, "speaker": "Speaker " * 30}
+        self.assertEqual(await self.ns["pet_open"](Ask("open-pet", {"audio": audio})), {"ok": True})
+        self.assertEqual(self.window.audio, audio)
+        self.assertEqual(self.window.calls[0], ("close",))
+
+    async def test_invalid_audio_selections_never_start_a_window(self):
+        for audio in ([], "speaker", {}, {"mic": 1, "speaker": ""}, {"mic": "", "speaker": "x" * 257},
+                      {"mic": "", "speaker": "", "camera": "camera"}):
+            await self.refused("pet_open", Ask("open-pet", {"audio": audio}), 400, "Audio selections")
 
     async def test_only_a_plain_true_switches_anything_on(self):
         for body in ({"power": 1, "mic": "yes"}, {"power": "true"}, {}, b""):

@@ -675,6 +675,7 @@
   let ws = null, wsWanted = false, reconnectTimer = null;
   let micActive = false, micStream = null, micCtx = null, micSrc = null, micNode = null;
   let micStarting = false, micRequest = 0;
+  let petAudioNames = null;
   // she is out in her desktop pet window (the "Desktop pet" button, below): this page rests until she is back
   let petOut = false;
   const offHint = () => (petOut ? "she is on your desktop" : "press power to connect");
@@ -690,6 +691,7 @@
     power.setAttribute("aria-pressed", String(on || state === "Connecting"));
     power.classList.toggle("connecting", state === "Connecting");
     power.title = on || state === "Connecting" ? "Disconnect" : "Connect";
+    if (PET && petAudioNames) power.title += " — Audio output: " + (petAudioNames.speaker || "System default");
     $("sessionDot").className = "dot " + (micActive && on ? "live" : on ? "ok" : state === "Connecting" ? "warn" : "");
     setNavDot(1, on ? "ok" : "err");
     $("sayBtn").disabled = !on || !$("sayInput").value.trim();
@@ -704,8 +706,9 @@
   function setMicUI() {
     const btn = $("micBtn");
     btn.setAttribute("aria-pressed", String(micActive));
-    btn.querySelector("use").setAttribute("href", micActive ? "#i-mic" : "#i-mic-off");
+    btn.querySelector("use").setAttribute("href", PET || micActive ? "#i-mic" : "#i-mic-off");
     btn.title = micActive ? "Mic on — tap to mute (M)" : "Mic off — tap to talk (M)";
+    if (PET && petAudioNames) btn.title += " — " + (micStream?.getAudioTracks()[0]?.label || petAudioNames.mic || "System default");
   }
   // the mic button's ring follows your voice level
   let micMeterRaf = 0;
@@ -828,7 +831,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
     return URL.createObjectURL(new Blob([code], { type: "application/javascript" }));
   }
 
-  async function startMic() {
+  async function startMic(strictDevice = false) {
     if (micActive || micStarting) return;
     const request = ++micRequest;
     micStarting = true;
@@ -837,7 +840,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
     try {
       stream = await openMedia("mic", {
         audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
-      });
+      }, strictDevice);
     } catch (error) {
       if (request === micRequest) { micStarting = false; toast("Microphone was refused: " + error.message, true); }
       return;
@@ -895,14 +898,14 @@ registerProcessor('pcm-pusher', PCMPusher);`;
   ];
   // getUserMedia on the picked device; one that is unplugged falls back to the default with a note
   const fellBack = new WeakSet();     // streams opened on the default because the picked device was missing
-  async function openMedia(kind, constraints) {
+  async function openMedia(kind, constraints, strictDevice = false) {
     const key = kind === "mic" ? "audio" : "video", id = devices.get(kind);
     let stream = null;
     if (id) {
       try {
         stream = await navigator.mediaDevices.getUserMedia({ ...constraints, [key]: { ...constraints[key], deviceId: { exact: id } } });
       } catch (error) {
-        if (error.name !== "OverconstrainedError" && error.name !== "NotFoundError") throw error;
+        if (strictDevice || (error.name !== "OverconstrainedError" && error.name !== "NotFoundError")) throw error;
         toast(`The ${kind === "mic" ? "microphone" : "camera"} you picked is not connected — using the system default.`, true);
       }
     }
@@ -955,6 +958,49 @@ registerProcessor('pcm-pusher', PCMPusher);`;
     if (petBlocked()) return;
     if (micActive || micStarting) stopMic(); else startMic();
   });
+
+  // IDs are private to a browser profile/origin. Transfer exact device names, then resolve this WebView's own IDs.
+  async function audioForPet() {
+    const selections = { mic: devices.get("mic"), speaker: devices.get("speaker") };
+    const list = Object.values(selections).some(Boolean) ? await navigator.mediaDevices.enumerateDevices() : [];
+    const audio = {};
+    for (const [kind, id] of Object.entries(selections)) {
+      if (!id || id === "default") { audio[kind] = ""; continue; }
+      const device = list.find(d => d.kind === (kind === "mic" ? "audioinput" : "audiooutput") && d.deviceId === id);
+      if (!device?.label || device.label.length > 256) {
+        throw new Error(`Select an available ${kind === "mic" ? "microphone" : "audio output"} in Settings before moving her.`);
+      }
+      audio[kind] = device.label;
+    }
+    return audio;
+  }
+
+  async function applyPetAudio(audio) {
+    const list = Object.values(audio).some(Boolean) ? await navigator.mediaDevices.enumerateDevices() : [];
+    const selected = {};
+    for (const kind of ["mic", "speaker"]) {
+      if (!audio[kind]) { selected[kind] = ""; continue; }
+      const found = list.filter(d => d.kind === (kind === "mic" ? "audioinput" : "audiooutput") &&
+        d.label === audio[kind] && d.deviceId && !["default", "communications"].includes(d.deviceId));
+      if (found.length !== 1) {
+        throw new Error(`The selected ${kind === "mic" ? "microphone" : "audio output"} (${audio[kind]}) ${found.length ? "has more than one matching device" : "is unavailable in the desktop window"}.`);
+      }
+      selected[kind] = found[0].deviceId;
+    }
+    if (selected.speaker && !devices.canPickSpeaker) throw new Error("This desktop window cannot select an audio output device.");
+    const previous = { mic: devices.get("mic"), speaker: devices.get("speaker") };
+    try {
+      devices.set("mic", selected.mic);
+      devices.set("speaker", selected.speaker);
+      await avatar.ensureAudio();
+      if (!(await avatar.setOutputDevice(selected.speaker))) throw new Error("The selected audio output could not be opened in the desktop window.");
+    } catch (error) {
+      devices.set("mic", previous.mic); devices.set("speaker", previous.speaker);
+      throw error;
+    }
+    petAudioNames = audio;
+    setPowerUI("Offline", offHint());
+  }
 
   // ── her desktop pet window, from this page: the "Desktop pet" button ──
   // GET /api/pet says whether this browser is on the PC she runs on (only there does the button show), whether her
@@ -1024,6 +1070,9 @@ registerProcessor('pcm-pusher', PCMPusher);`;
   // this page lets go of her session, her window opens and takes it over; when the window does not come she is back
   // here as she was
   async function sendToDesktop() {
+    let audio;
+    try { audio = await audioForPet(); }
+    catch (error) { toast(error.message, true); return; }
     const wasOn = wsWanted, wasMic = micActive || micStarting;
     showPetSetup(false);
     if (bigMode) exitBig();
@@ -1031,7 +1080,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
     disconnect();
     setPowerUI("Offline", "opening her desktop window…");
     let result = null, failure = "";
-    try { result = await postAction("/api/pet/open", "open-pet", { power: wasOn, mic: wasMic }); }
+    try { result = await postAction("/api/pet/open", "open-pet", { power: wasOn, mic: wasMic, audio }); }
     catch (error) { failure = error.message; }
     petMoving = false;
     if (result && result.ok) {
@@ -1114,9 +1163,23 @@ registerProcessor('pcm-pusher', PCMPusher);`;
       let state = null;
       try { state = await window.pywebview.api.handover(); } catch (_) {}
       if (!state) return;
-      if (state.power || state.mic) avatar.ensureAudio();
-      if (state.power && !wsWanted) connect();
-      if (state.mic) startMic();
+      const previousAudio = state.audio ? { mic: devices.get("mic"), speaker: devices.get("speaker") } : null;
+      try {
+        if (state.audio_error) throw new Error(state.audio_error);
+        if (state.audio) await applyPetAudio(state.audio);
+        if (state.power || state.mic) await avatar.ensureAudio();
+        if (state.power && !wsWanted) connect();
+        if (state.mic) {
+          await startMic(!!state.audio);
+          if (state.audio && (!micActive || fellBack.has(micStream))) throw new Error("The selected microphone could not be opened in the desktop window.");
+        }
+        if (state.audio) await window.pywebview.api.handover_done();
+      } catch (error) {
+        disconnect();
+        if (previousAudio) { devices.set("mic", previousAudio.mic); devices.set("speaker", previousAudio.speaker); }
+        if (state.audio) await window.pywebview.api.handover_done(error.message);
+        else toast(error.message, true);
+      }
     };
     const bridge = window.pywebview && window.pywebview.api;
     if (bridge && typeof bridge.handover === "function") takeOver();

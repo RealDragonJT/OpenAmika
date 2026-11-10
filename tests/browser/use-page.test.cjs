@@ -54,8 +54,19 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
     };
     return route.fulfill({ json: fixtures[p] || {} });
   });
-  await page.addInitScript(({ host, handover }) => {
+  await page.addInitScript(({ host, handover, mediaDevices, savedDevices, outputFailure, inputFailure }) => {
     window.fixture = { sockets: [], streams: [], requests: [], pending: [], holdMedia: false, denyMedia: false };
+    for (const [kind, id] of Object.entries(savedDevices || {})) localStorage.setItem('openamika-' + kind + 'Device', id);
+    if (mediaDevices) {
+      navigator.mediaDevices.enumerateDevices = async () => mediaDevices;
+      fixture.sinks = [];
+      const setSink = AudioContext.prototype.setSinkId;
+      AudioContext.prototype.setSinkId = function(id) {
+        fixture.sinks.push(id);
+        if (id && outputFailure) return Promise.reject(new DOMException('Test output refusal', 'NotAllowedError'));
+        return setSink.call(this, '');
+      };
+    }
     if (host) {
       fixture.hostCalls = [];
       window.pywebview = { api: Object.fromEntries(['zoom', 'full_page', 'close'].map(name =>
@@ -64,6 +75,7 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
         fixture.hostCalls.push(['handover']);
         const state = handover; handover = null; return state;
       };
+      window.pywebview.api.handover_done = async error => fixture.hostCalls.push(['handover_done', error || null]);
     }
     window.WebSocket = class {
       constructor(url) {
@@ -79,11 +91,17 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
       fixture.requests.push(constraints);
       if (fixture.holdMedia) await new Promise(resolve => fixture.pending.push(resolve));
       if (fixture.denyMedia) throw new DOMException('Test permission refusal', 'NotAllowedError');
-      const stream = await get(constraints);
+      if (inputFailure && constraints.audio?.deviceId?.exact) throw new DOMException('Test disconnected input', 'OverconstrainedError');
+      let actual = constraints;
+      if (mediaDevices?.some(d => d.kind === 'audioinput' && d.deviceId === constraints.audio?.deviceId?.exact)) {
+        actual = { ...constraints, audio: { ...constraints.audio } }; delete actual.audio.deviceId;
+      }
+      const stream = await get(actual);
       fixture.streams.push(stream);
       return stream;
     };
-  }, { host: !!options.host, handover: options.handover });
+  }, { host: !!options.host, handover: options.handover, mediaDevices: options.mediaDevices,
+    savedDevices: options.savedDevices, outputFailure: options.outputFailure, inputFailure: options.inputFailure });
   await page.goto('http://localhost:53999/use?' + (options.pet ? 'pet=1' : 'kiosk=1'));
   await page.waitForFunction(({ ready, pending }) => window.OA && window.OpenAmikaAvatar &&
     (pending ? !!fixture.avatarOptions : ready ? Array.isArray(fixture.busyHistory) && fixture.busyHistory.length
@@ -210,7 +228,7 @@ const localPet = { supported: true, local: true, installed: true, running: false
 test('desktop pet handoff releases media, retains draft, and returns to the browser', async t => {
   const p = await open(t, undefined, 1, true, { petInfo: localPet });
   await p.route('**/api/pet/open', async route => {
-    assert.deepEqual(route.request().postDataJSON(), { power: true, mic: true });
+    assert.deepEqual(route.request().postDataJSON(), { power: true, mic: true, audio: { mic: '', speaker: '' } });
     assert.equal(route.request().headers()['x-build-f-action'], 'open-pet');
     await route.fulfill({ json: { ok: true } });
   });
@@ -301,6 +319,88 @@ test('native pet handover takes over power and microphone once with a pet-owned 
   assert.equal(await p.evaluate(() => fixture.sockets.find(s => s.url.includes('/ws/dialog')).url.endsWith('?pet=1')), true);
   assert.equal(await p.evaluate(() => fixture.hostCalls.filter(c => c[0] === 'handover').length), 1);
   await p.locator('#powerBtn').click(); await noTracks(p);
+});
+
+const petAudioDevices = [
+  { kind: 'audioinput', deviceId: 'native-mic', label: 'USB microphone' },
+  { kind: 'audiooutput', deviceId: 'native-speaker', label: 'Headphones' },
+];
+
+test('web handoff sends device names rather than browser-specific IDs', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: localPet,
+    mediaDevices: petAudioDevices.map(d => ({ ...d, deviceId: d.deviceId.replace('native-', 'web-') })),
+    savedDevices: { mic: 'web-mic', speaker: 'web-speaker' } });
+  let received;
+  await p.route('**/api/pet/open', route => { received = route.request().postDataJSON(); return route.fulfill({ json: { ok: true } }); });
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petAway').waitFor({ state: 'visible' });
+  assert.deepEqual(received, { power: false, mic: false, audio: { mic: 'USB microphone', speaker: 'Headphones' } });
+});
+
+test('native handoff resolves different device IDs before microphone capture and output', async t => {
+  const p = await open(t, undefined, 1, true, { pet: true, host: true, mediaDevices: petAudioDevices,
+    savedDevices: { mic: 'old-native-mic', speaker: 'old-native-speaker' },
+    handover: { power: true, mic: true, audio: { mic: 'USB microphone', speaker: 'Headphones' } } });
+  await p.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'handover_done'));
+  assert.deepEqual(await p.evaluate(() => [OA.devices.get('mic'), OA.devices.get('speaker')]), ['native-mic', 'native-speaker']);
+  assert.equal(await p.evaluate(() => fixture.requests[0].audio.deviceId.exact), 'native-mic');
+  assert.equal(await p.evaluate(() => fixture.sinks.at(-1)), 'native-speaker');
+  assert.deepEqual(await p.evaluate(() => fixture.hostCalls.find(c => c[0] === 'handover_done')), ['handover_done', null]);
+  assert.match(await p.locator('#powerBtn').getAttribute('title'), /Headphones/);
+  await p.locator('#powerBtn').click(); await noTracks(p);
+});
+
+test('audio selection with the microphone off never opens a capture stream', async t => {
+  const p = await open(t, undefined, 1, true, { pet: true, host: true, mediaDevices: petAudioDevices,
+    handover: { power: false, mic: false, audio: { mic: 'USB microphone', speaker: 'Headphones' } } });
+  await p.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'handover_done'));
+  assert.equal(await p.evaluate(() => fixture.requests.length), 0);
+  assert.equal(await p.evaluate(() => fixture.sinks.at(-1)), 'native-speaker');
+  await pressed(p, 'micBtn', false); await pressed(p, 'powerBtn', false);
+});
+
+test('system-default handoff clears stale pet selections', async t => {
+  const p = await open(t, undefined, 1, true, { pet: true, host: true, mediaDevices: petAudioDevices,
+    savedDevices: { mic: 'old-mic', speaker: 'old-speaker' },
+    handover: { power: false, mic: false, audio: { mic: '', speaker: '' } } });
+  await p.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'handover_done'));
+  assert.deepEqual(await p.evaluate(() => [OA.devices.get('mic'), OA.devices.get('speaker')]), ['', '']);
+  assert.equal(await p.evaluate(() => fixture.sinks.at(-1)), '');
+  assert.equal(await p.evaluate(() => fixture.requests.length), 0);
+});
+
+test('missing or ambiguous devices and output failures reject the native handoff', async t => {
+  for (const scenario of ['missing', 'ambiguous', 'output', 'input']) {
+    const p = await open(t, undefined, 1, true, { pet: true, host: true,
+      mediaDevices: scenario === 'missing' ? [] : scenario === 'ambiguous'
+        ? [...petAudioDevices, { ...petAudioDevices[0], deviceId: 'second-mic' }] : petAudioDevices,
+      outputFailure: scenario === 'output', inputFailure: scenario === 'input', savedDevices: { mic: 'previous-mic', speaker: 'previous-speaker' },
+      handover: { power: true, mic: true, audio: { mic: 'USB microphone', speaker: 'Headphones' } } });
+    await p.waitForFunction(() => fixture.hostCalls.some(c => c[0] === 'handover_done'));
+    assert.ok(await p.evaluate(() => fixture.hostCalls.find(c => c[0] === 'handover_done')[1]), scenario);
+    assert.equal(await p.evaluate(() => fixture.requests.length), scenario === 'input' ? 1 : 0, scenario + ': no fallback input capture');
+    await noTracks(p);
+    assert.deepEqual(await p.evaluate(() => [OA.devices.get('mic'), OA.devices.get('speaker')]), ['previous-mic', 'previous-speaker']);
+    await pressed(p, 'powerBtn', false);
+  }
+});
+
+test('failed pet opening keeps the webcam on; returning from a successful move leaves it off', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: localPet });
+  let success = false;
+  await p.route('**/api/pet/open', route => route.fulfill({ json: { ok: success, reason: 'Audio device unavailable' } }));
+  await p.route('**/api/pet/close', route => route.fulfill({ json: { ok: true, had_session: false } }));
+  await p.locator('#camBtn').click(); await pressed(p, 'camBtn', true);
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.waitForFunction(() => !petBtn.disabled);
+  await pressed(p, 'camBtn', true);
+  assert.equal(await p.evaluate(() => fixture.streams[0].getVideoTracks()[0].readyState), 'live');
+  success = true;
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petAway').waitFor({ state: 'visible' }); await noTracks(p);
+  await p.locator('#petBackBtn').click(); await p.locator('#petAway').waitFor({ state: 'hidden' });
+  await pressed(p, 'camBtn', false);
+  assert.equal(await p.evaluate(() => fixture.requests.length), 1, 'camera was not reopened on return');
 });
 
 test('scene, expand menu, and transcript dismiss with focus restored; draft text survives', async t => {

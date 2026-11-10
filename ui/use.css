@@ -319,6 +319,21 @@ html.pet .u-stage:hover .pet-bar {
 }
 html.pet .u-stage:hover .pet-bar > *, html.pet .pet-bar > .u-mic[aria-pressed="true"] { opacity: 1; }
 html.pet .pet-bar .u-dbtn { width: 40px; height: 40px; }
+/* Keep the original pet's softer controls; the full web page keeps its stronger active colours. */
+html.pet .pet-bar .u-dbtn {
+  background: rgba(216, 180, 226, .08); border: 1px solid rgba(216, 180, 226, .35); color: var(--lavender);
+}
+html.pet .pet-bar .u-dbtn:hover { background: rgba(216, 180, 226, .08); border-color: rgba(216, 180, 226, .7); }
+html.pet .pet-bar .u-power[aria-pressed="true"] {
+  background: rgba(216, 180, 226, .22); color: #fff; border-color: rgba(216, 180, 226, .8);
+  animation: power-glow 2.5s ease-in-out infinite;
+}
+html.pet .pet-bar .u-mic[aria-pressed="true"] {
+  background: rgba(224, 86, 86, .2); color: #fff; border-color: rgba(224, 86, 86, .8);
+  animation: mic-pulse 1.6s ease-in-out infinite;
+}
+html.pet .pet-bar .u-mic::after { display: none; }
+html.pet .pet-bar .u-dbtn .u-i { width: 18px; height: 18px; }
 @media (max-width: 220px) {
   html.pet .pet-bar { gap: 4px; padding: 6px; }
   html.pet .pet-bar .u-dbtn { width: 32px; height: 32px; }

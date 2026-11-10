@@ -4657,7 +4657,7 @@ def _pet_guard(request, action):
 
 async def _pet_json(request):
     body = await request.body()
-    if len(body) > 1024:
+    if len(body) > 4096:
         raise HTTPException(status_code=400, detail="Control request is too large.")
     try:
         payload = json.loads(body or b"{}")
@@ -4696,6 +4696,10 @@ async def pet_open(request: Request):
     _pet_guard(request, "open-pet")
     payload = await _pet_json(request)
     power, mic = payload.get("power") is True, payload.get("mic") is True
+    audio = payload.get("audio")
+    if audio is not None and (not isinstance(audio, dict) or set(audio) != {"mic", "speaker"}
+                              or any(not isinstance(v, str) or len(v) > 256 for v in audio.values())):
+        raise HTTPException(status_code=400, detail="Audio selections must name a microphone and speaker.")
     if _pet_busy or _wipe_in_progress:
         return dict(_PET_BUSY)
     _pet_busy = True
@@ -4703,7 +4707,7 @@ async def pet_open(request: Request):
         if power:
             await _pet_session_gone(3)                   # the page's socket is on its way out
         if pet_window.running():
-            if not power:
+            if not power and audio is None:
                 return {"ok": True, "already": True}
             # a window is open already and does not hold her session: a new one takes the session over
             closed = await asyncio.to_thread(pet_window.close)
@@ -4712,7 +4716,10 @@ async def pet_open(request: Request):
             await _pet_session_gone(4)
         # her own address from the launcher, never the request's Host header
         base = os.getenv("AMIKA_CHAT_URL") or f"http://localhost:{os.getenv('YUMEHA_PORT', '53000')}"
-        return await asyncio.to_thread(pet_window.start, base, power=power, mic=mic)
+        options = {"power": power, "mic": mic}
+        if audio is not None:
+            options["audio"] = audio
+        return await asyncio.to_thread(pet_window.start, base, **options)
     finally:
         _pet_busy = False
 

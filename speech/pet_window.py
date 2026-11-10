@@ -194,11 +194,12 @@ def _failed(reason, code='failed') -> dict:
     return {'ok': False, 'code': code, 'reason': reason}
 
 
-def start(base_url, *, power=False, mic=False, python=None, script=PET, name=None, wait=25.0, log=LOG) -> dict:
+def start(base_url, *, power=False, mic=False, audio=None, python=None, script=PET, name=None, wait=25.0, log=LOG) -> dict:
     """Open her window (pet.py --url base_url) and wait until her page is alive in it.
 
     power, mic: what the page that sends her there had on; her window's page takes both over once (pet.py
-    PetApi.handover: no click is needed there, and nothing travels in the address).
+    PetApi.handover: no click is needed there, and nothing travels in the address). Optional audio labels travel
+    in the child's environment; readiness then waits for the page to resolve and apply its own device IDs.
     Returns {'ok': True} ('already': True when her window was open before), or {'ok': False, 'code', 'reason'} with
     code 'unsupported' (not Windows), 'no_python', 'not_installed' (pywebview is missing: install() adds it),
     'closed' (it opened and went away) or 'failed'."""
@@ -216,6 +217,11 @@ def start(base_url, *, power=False, mic=False, python=None, script=PET, name=Non
     command = [str(python), '-X', 'utf8', str(script), '--url', str(base_url), '--close-with', str(os.getpid())]
     command += ['--power'] if power else []
     command += ['--mic'] if mic else []
+    env = os.environ.copy()
+    env.pop('AMIKA_PET_AUDIO', None)
+    if audio is not None:
+        # Device labels cross browser profiles; their private device IDs do not. Keep labels out of URLs/commands.
+        env['AMIKA_PET_AUDIO'] = json.dumps(audio)
     log = Path(log)
     try:
         log.parent.mkdir(parents=True, exist_ok=True)
@@ -224,7 +230,7 @@ def start(base_url, *, power=False, mic=False, python=None, script=PET, name=Non
                          f"{' '.join(command)}\n".encode('utf-8'))
             handle.flush()
             offset = handle.tell()
-            proc = subprocess.Popen(command, cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=handle,
+            proc = subprocess.Popen(command, cwd=str(ROOT), env=env, stdin=subprocess.DEVNULL, stdout=handle,
                                     stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
     except OSError as error:
         return _failed(f'Her desktop window could not start: {error}')
@@ -243,7 +249,7 @@ def start(base_url, *, power=False, mic=False, python=None, script=PET, name=Non
                 return _failed(said or 'Her desktop window opened and closed again.', 'closed')
             return _failed(said or f'Her desktop window stopped with code {code}. See logs/{log.name}.')
         if time.monotonic() >= deadline:
-            if running(name):                    # the window is there and her page is slow: it is hers to finish
+            if audio is None and running(name):  # without a device transfer, the slow page is hers to finish
                 break
             _kill_tree(proc.pid)
             return _failed(f'Her desktop window did not open in time. See logs/{log.name}.')
