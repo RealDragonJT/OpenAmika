@@ -371,7 +371,9 @@ If **Voice output** is off, she asks before moving: **Enable and move** turns sp
 move, spoken replies stay enabled when you bring her back to the browser.
 
 The microphone and audio output selected in the web page carry over to her desktop window. Hover the microphone
-for its input name, or power for the output name. If a named device is unavailable or ambiguous, the move fails
+for its input name, or power for the output name. A selected device that the page cannot find (unplugged, or the
+browser has not been allowed to read device names yet) moves as System default, and the page tells you; the
+selection itself stays saved. If her desktop window cannot find a named device, or finds it twice, the move fails
 and the browser session is restored. System default stays System default. The webcam switches off after a
 successful move; bring her back and enable it again when you want to use it. Pet controls keep their softer styling.
 
