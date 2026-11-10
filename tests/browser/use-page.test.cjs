@@ -86,23 +86,78 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
 const pressed = (page, id, value) => page.waitForFunction(([id, value]) => document.getElementById(id).getAttribute('aria-pressed') === String(value), [id, value]);
 const noTracks = page => page.waitForFunction(() => fixture.streams.every(s => s.getTracks().every(t => t.readyState === 'ended')));
 
+async function engineFunctions(names, bindings = {}) {
+  const source = (await fs.readFile(path.join(root, 'ui/live2d-engine.js'), 'utf8')).replace(/\r\n/g, '\n');
+  const helpers = source.includes('function assetFilename(') ? ['assetFilename'] : [];
+  const pieces = [...helpers, ...names].map(name => {
+    let start = source.indexOf('function ' + name + '(');
+    assert.ok(start >= 0, name + ' exists');
+    if (source.slice(start - 6, start) === 'async ') start -= 6;
+    const end = source.indexOf('\n  }\n', start);
+    assert.ok(end > start, name + ' body exists');
+    return source.slice(start, end + 5);
+  });
+  return new Function(...Object.keys(bindings), pieces.join('\n') + '; return {' + names.join(',') + '};')(...Object.values(bindings));
+}
+
 test('versioned motion URLs stay intact without duplicating existing motions', async () => {
-  const source = await fs.readFile(path.join(root, 'ui/live2d-engine.js'), 'utf8');
-  const start = source.indexOf('async function injectExternalMotions(');
-  const end = source.indexOf('// ── lip sync', start);
   const entries = [
     { type: 'motion', file: 'idle.motion3.json', path: '/avatar_models/Model/idle.motion3.json?v=one' },
     { type: 'motion', file: 'new.motion3.json', path: '/avatar_models/Model/sub/new.motion3.json?v=two' },
     { type: 'expression', file: 'smile.exp3.json', path: '/avatar_models/Model/smile.exp3.json?v=three' },
   ];
-  const inject = new Function('fetch', source.slice(start, end) + '; return injectExternalMotions;')(
-    async () => ({ json: async () => entries }));
+  const { injectExternalMotions: inject } = await engineFunctions(['injectExternalMotions'], {
+    fetch: async () => ({ json: async () => entries }),
+  });
   const manager = { definitions: { Idle: [{ File: 'idle.motion3.json?v=one' }] } };
   await inject(manager, { motions_url: '/registry' });
   await inject(manager, { motions_url: '/registry' });
   assert.deepEqual(manager.definitions.Idle.map(m => m.File), [
     'idle.motion3.json?v=one', '/avatar_models/Model/sub/new.motion3.json?v=two',
   ]);
+});
+
+test('agent idle and state motions match versioned URLs without changing the download URL', async () => {
+  for (const [name, file] of [
+    ['idle1', 'idle1.motion3.json'],
+    ['idle1', 'motions/idle1.motion3.json?v=content'],
+    ['think1', '/avatar_models/Host/think1.motion3.json?v=content#motion'],
+    ['talk one', '/avatar_models/Host/talk%20one.motion3.json?v=content'],
+  ]) {
+    const calls = [];
+    const definitions = { Idle: [{ File: 'other.motion3.json' }, { File: file }] };
+    const agent = { model: { internalModel: { motionManager: { definitions } }, motion: (...args) => calls.push(args) } };
+    const { agentPlay } = await engineFunctions(['agentPlay'], { agent });
+    assert.equal(agentPlay(name), true, file);
+    assert.deepEqual(calls, [['Idle', 1, 3]]);
+    assert.equal(agent.lastMotion, name);
+    assert.equal(definitions.Idle[1].File, file, 'keep cache version for the actual request');
+    assert.equal(agentPlay('missing'), false);
+  }
+});
+
+test('versioned expressions use the expression manager and retain the missing-definition fallback', async () => {
+  for (const file of ['smile.exp3.json', 'expressions/smile.exp3.json?v=content',
+    '/avatar_models/Amika/smile.exp3.json?v=content#expression']) {
+    const managed = [], fallback = [], activeExpressions = new Set();
+    const asset = { name: 'smile', file: 'smile.exp3.json', path: '/avatar_models/Amika/smile.exp3.json?v=content' };
+    const definitions = [{ Name: 'smile', File: file }];
+    const live2dModel = { internalModel: { motionManager: { expressionManager: {
+      definitions, setExpression: index => managed.push(index),
+    } } } };
+    const { activateExpressionByName } = await engineFunctions(['activateExpressionByName'], {
+      expressionAssets: [asset], activeExpressions, live2dModel,
+      applyExpressionFromPath: (...args) => fallback.push(args),
+    });
+    activateExpressionByName('smile');
+    activateExpressionByName('smile');
+    assert.deepEqual(managed, [0], file + ' uses library fading/blending once');
+    assert.deepEqual(fallback, []);
+    assert.equal(definitions[0].File, file);
+    activeExpressions.clear(); definitions.length = 0;
+    activateExpressionByName('smile');
+    assert.deepEqual(fallback, [[asset.path, asset.file]], 'unknown definitions still use the original fallback URL');
+  }
 });
 
 test('avatar loading shows each stage without blocking controls or shifting the layout', async t => {
