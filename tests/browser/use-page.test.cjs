@@ -26,10 +26,13 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
     if (p === '/use' || p.startsWith('/ui/')) {
       const f = path.join(root, p === '/use' ? 'ui/use.html' : p.slice(1));
       const contentType = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.webp': 'image/webp' }[path.extname(f)];
-      if (readyAvatar && p === '/ui/live2d-engine.js') {
+      if ((readyAvatar || options.pendingAvatar) && p === '/ui/live2d-engine.js') {
         // Simulate a loaded model and observe the busy-display API without licensed model assets.
         const body = await fs.readFile(f, 'utf8') + `
-          OpenAmikaAvatar.init = async options => { fixture.avatarOptions = options; return { ok: true }; };
+          OpenAmikaAvatar.init = async options => {
+            fixture.avatarOptions = options;
+            ${options.pendingAvatar ? 'return new Promise((resolve, reject) => { fixture.completeAvatar = resolve; fixture.failAvatar = reject; });' : 'return { ok: true };'}
+          };
           fixture.busyHistory = [];
           OpenAmikaAvatar.setBusy = on => { fixture.busy = on; fixture.busyHistory.push(on); };
           const flush = OpenAmikaAvatar.flush;
@@ -75,8 +78,9 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
     };
   }, { host: !!options.host });
   await page.goto('http://localhost:53999/use?' + (options.pet ? 'pet=1' : 'kiosk=1'));
-  await page.waitForFunction(ready => window.OA && window.OpenAmikaAvatar &&
-    (ready ? Array.isArray(fixture.busyHistory) && fixture.busyHistory.length : !document.querySelector('#stageEmpty').hidden), readyAvatar);
+  await page.waitForFunction(({ ready, pending }) => window.OA && window.OpenAmikaAvatar &&
+    (pending ? !!fixture.avatarOptions : ready ? Array.isArray(fixture.busyHistory) && fixture.busyHistory.length
+      : !document.querySelector('#stageEmpty').hidden), { ready: readyAvatar, pending: !!options.pendingAvatar });
   return page;
 }
 const pressed = (page, id, value) => page.waitForFunction(([id, value]) => document.getElementById(id).getAttribute('aria-pressed') === String(value), [id, value]);
@@ -99,6 +103,44 @@ test('versioned motion URLs stay intact without duplicating existing motions', a
   assert.deepEqual(manager.definitions.Idle.map(m => m.File), [
     'idle.motion3.json?v=one', '/avatar_models/Model/sub/new.motion3.json?v=two',
   ]);
+});
+
+test('avatar loading shows each stage without blocking controls or shifting the layout', async t => {
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 412, height: 915 }]) {
+    const p = await open(t, viewport, 1, false, { pendingAvatar: true });
+    const loading = p.locator('#avatarLoading');
+    assert.equal(await loading.isVisible(), true);
+    assert.equal(await p.locator('#avatarLoadingText').textContent(), 'Loading avatar…');
+    const before = await p.locator('#stageArea').boundingBox();
+    await p.locator('#sayInput').fill('Keep this while she loads');
+    await p.locator('#lockBtn').click();
+    await pressed(p, 'lockBtn', true);
+    await p.evaluate(() => fixture.avatarOptions.onProgress(40));
+    assert.equal(await p.locator('#avatarLoadingText').textContent(), 'Downloading avatar…');
+    await p.evaluate(() => fixture.avatarOptions.onProgress(90));
+    assert.equal(await p.locator('#avatarLoadingText').textContent(), 'Preparing avatar…');
+    await p.emulateMedia({ reducedMotion: 'reduce' });
+    assert.equal(await p.locator('.u-avatar-spinner').evaluate(e => getComputedStyle(e).animationName), 'none');
+    await p.evaluate(() => fixture.completeAvatar({ ok: true }));
+    await loading.waitFor({ state: 'hidden' });
+    assert.deepEqual(await p.locator('#stageArea').boundingBox(), before);
+    assert.equal(await p.locator('#sayInput').inputValue(), 'Keep this while she loads');
+    assert.equal(await p.locator('#stageEmpty').isHidden(), true);
+  }
+});
+
+test('avatar loading ends for missing models, failed requests and rejected initialization', async t => {
+  const empty = await open(t);
+  assert.equal(await empty.locator('#avatarLoading').isHidden(), true);
+  assert.equal(await empty.locator('#stageEmpty .big').textContent(), 'No Live2D model yet');
+  for (const failure of ['registry', 'load-failed', 'rejection']) {
+    const p = await open(t, undefined, 1, false, { pendingAvatar: true });
+    await p.evaluate(reason => reason === 'rejection' ? fixture.failAvatar(new Error('fixture startup failure'))
+      : fixture.completeAvatar({ ok: false, reason }), failure);
+    await p.locator('#avatarLoading').waitFor({ state: 'hidden' });
+    assert.equal(await p.locator('#stageEmpty .big').textContent(), "Avatar couldn't load");
+    assert.equal(await p.locator('#stageEmpty').isVisible(), true);
+  }
 });
 
 test('scene, expand menu, and transcript dismiss with focus restored; draft text survives', async t => {
