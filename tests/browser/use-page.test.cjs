@@ -82,6 +82,25 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
 const pressed = (page, id, value) => page.waitForFunction(([id, value]) => document.getElementById(id).getAttribute('aria-pressed') === String(value), [id, value]);
 const noTracks = page => page.waitForFunction(() => fixture.streams.every(s => s.getTracks().every(t => t.readyState === 'ended')));
 
+test('versioned motion URLs stay intact without duplicating existing motions', async () => {
+  const source = await fs.readFile(path.join(root, 'ui/live2d-engine.js'), 'utf8');
+  const start = source.indexOf('async function injectExternalMotions(');
+  const end = source.indexOf('// ── lip sync', start);
+  const entries = [
+    { type: 'motion', file: 'idle.motion3.json', path: '/avatar_models/Model/idle.motion3.json?v=one' },
+    { type: 'motion', file: 'new.motion3.json', path: '/avatar_models/Model/sub/new.motion3.json?v=two' },
+    { type: 'expression', file: 'smile.exp3.json', path: '/avatar_models/Model/smile.exp3.json?v=three' },
+  ];
+  const inject = new Function('fetch', source.slice(start, end) + '; return injectExternalMotions;')(
+    async () => ({ json: async () => entries }));
+  const manager = { definitions: { Idle: [{ File: 'idle.motion3.json?v=one' }] } };
+  await inject(manager, { motions_url: '/registry' });
+  await inject(manager, { motions_url: '/registry' });
+  assert.deepEqual(manager.definitions.Idle.map(m => m.File), [
+    'idle.motion3.json?v=one', '/avatar_models/Model/sub/new.motion3.json?v=two',
+  ]);
+});
+
 test('scene, expand menu, and transcript dismiss with focus restored; draft text survives', async t => {
   const p = await open(t);
   await p.locator('#sceneBtn').click();

@@ -338,13 +338,14 @@
     if (!Array.isArray(gm)) return;
     try {
       const list = await (await fetch(opt.motions_url)).json();
-      const existing = new Set(gm.map((m) => (m && m.File && m.File.split("/").pop()) || (m && m.File)).filter(Boolean));
+      const filename = (url) => typeof url === "string" ? url.split(/[?#]/, 1)[0].split("/").pop() : "";
+      const existing = new Set(gm.map((m) => filename(m && m.File)).filter(Boolean));
       let added = 0;
       for (const item of list) {
         if (item.type === "expression") continue;
-        const fn = item.file || (item.path && item.path.split("/").pop());
+        const fn = item.file || filename(item.path);
         if (!fn || !fn.endsWith(".motion3.json") || existing.has(fn)) continue;
-        gm.push({ File: fn, FadeInTime: 0.5, FadeOutTime: 0.5 });
+        gm.push({ File: item.path || fn, FadeInTime: 0.5, FadeOutTime: 0.5 });
         existing.add(fn); added++;
       }
       if (added) console.info(`[Live2D] injected ${added} external motion(s)`);
