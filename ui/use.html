@@ -57,6 +57,12 @@
         <div>Her model comes with her voice: run<br><code>envs\brain\Scripts\python.exe scripts\setup_tts.py</code><br>(README, “Set her up”), then reload this page.<br>Any other Cubism model works too: put its folder in <code>avatar/models/</code>.</div>
       </div>
 
+      <div class="pet-away-note" id="petAway" hidden>
+        <div class="big">Amika is on your desktop</div>
+        <div>Hover her desktop window for power, microphone, and close controls.</div>
+        <button class="btn primary" id="petBackBtn" type="button">Bring her back here</button>
+      </div>
+
       <div class="u-top">
         <div class="u-status u-glass" role="status" id="statusChip">
           <img src="/ui/assets/amika-avatar.png" alt="">
@@ -85,6 +91,18 @@
           <svg class="u-i"><use href="#i-expand"/></svg>
           <span><b>Fullscreen</b><span>Hides the browser and taskbar</span></span><kbd>F</kbd>
         </button>
+        <button type="button" class="u-opt" role="menuitem" id="petBtn" aria-label="Desktop pet" hidden>
+          <svg class="u-i"><use href="#i-window"/></svg><span>Desktop pet</span>
+        </button>
+      </div>
+
+      <div class="u-panel u-glass pet-setup" id="petSetup" role="dialog" aria-labelledby="petSetupTitle" hidden>
+        <div class="title" id="petSetupTitle">One small install first</div>
+        <div class="note">Her desktop window needs pywebview. Install it into her brain environment to continue.</div>
+        <div class="u-row">
+          <button class="btn small primary" id="petInstallBtn" type="button">Install and open</button>
+          <button class="btn small" id="petInstallNo" type="button">Not now</button>
+        </div>
       </div>
 
       <div class="u-panel u-glass" id="scenePanel" hidden>

@@ -76,6 +76,11 @@ html:has(body.use-page) { background: #0e0a12; }
               linear-gradient(to bottom, rgba(14, 10, 18, .5), transparent 20%);
 }
 .u-stage .stage-empty { z-index: 2; }
+.u-stage.pet-away > :not(#petAway) { visibility: hidden; }
+.u-stage .pet-away-note { border-radius: inherit; }
+.u-stage #petSetup { width: min(300px, calc(100% - 32px)); }
+.u-stage .pet-setup .title { font-weight: 700; }
+.u-stage .pet-setup .note { color: var(--u-muted); font-size: 13px; line-height: 1.5; }
 .u-avatar-loading {
   position: absolute; inset: 0; z-index: 3; pointer-events: none;
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;

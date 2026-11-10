@@ -38,6 +38,8 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
           const flush = OpenAmikaAvatar.flush;
           fixture.flushCount = 0;
           OpenAmikaAvatar.flush = () => { fixture.flushCount++; flush(); };
+          const pause = OpenAmikaAvatar.setPaused;
+          OpenAmikaAvatar.setPaused = on => { fixture.paused = on; pause(on); };
         `;
         return route.fulfill({ body, contentType });
       }
@@ -48,15 +50,20 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
       '/api/stage': { blur: 12, background: null },
       '/api/avatar/models': { models: [], emotions: [] },
       '/api/vision': { enabled: true },
+      '/api/pet': options.petInfo || { supported: true, local: false },
     };
     return route.fulfill({ json: fixtures[p] || {} });
   });
-  await page.addInitScript(({ host }) => {
+  await page.addInitScript(({ host, handover }) => {
     window.fixture = { sockets: [], streams: [], requests: [], pending: [], holdMedia: false, denyMedia: false };
     if (host) {
       fixture.hostCalls = [];
       window.pywebview = { api: Object.fromEntries(['zoom', 'full_page', 'close'].map(name =>
         [name, (...args) => { fixture.hostCalls.push([name, ...args]); return Promise.resolve(); }])) };
+      if (handover) window.pywebview.api.handover = async () => {
+        fixture.hostCalls.push(['handover']);
+        const state = handover; handover = null; return state;
+      };
     }
     window.WebSocket = class {
       constructor(url) {
@@ -76,7 +83,7 @@ async function open(t, viewport = { width: 1440, height: 900 }, deviceScaleFacto
       fixture.streams.push(stream);
       return stream;
     };
-  }, { host: !!options.host });
+  }, { host: !!options.host, handover: options.handover });
   await page.goto('http://localhost:53999/use?' + (options.pet ? 'pet=1' : 'kiosk=1'));
   await page.waitForFunction(({ ready, pending }) => window.OA && window.OpenAmikaAvatar &&
     (pending ? !!fixture.avatarOptions : ready ? Array.isArray(fixture.busyHistory) && fixture.busyHistory.length
@@ -196,6 +203,104 @@ test('avatar loading ends for missing models, failed requests and rejected initi
     assert.equal(await p.locator('#stageEmpty .big').textContent(), "Avatar couldn't load");
     assert.equal(await p.locator('#stageEmpty').isVisible(), true);
   }
+});
+
+const localPet = { supported: true, local: true, installed: true, running: false };
+
+test('desktop pet handoff releases media, retains draft, and returns to the browser', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: localPet });
+  await p.route('**/api/pet/open', async route => {
+    assert.deepEqual(route.request().postDataJSON(), { power: true, mic: true });
+    assert.equal(route.request().headers()['x-build-f-action'], 'open-pet');
+    await route.fulfill({ json: { ok: true } });
+  });
+  await p.route('**/api/pet/close', route => route.fulfill({ json: { ok: true, had_session: true } }));
+  await p.locator('#powerBtn').click(); await pressed(p, 'powerBtn', true);
+  await p.locator('#micBtn').click(); await pressed(p, 'micBtn', true);
+  await p.locator('#camBtn').click(); await pressed(p, 'camBtn', true);
+  await p.locator('#sayInput').fill('Keep my draft');
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petAway').waitFor({ state: 'visible' });
+  await noTracks(p);
+  assert.equal(await p.evaluate(() => fixture.paused), true);
+  assert.equal(await p.locator('#petBackBtn').evaluate(e => e === document.activeElement), true);
+  const count = await p.evaluate(() => fixture.requests.length);
+  await p.keyboard.press('m'); await p.keyboard.press('c');
+  assert.equal(await p.evaluate(() => fixture.requests.length), count);
+  await p.locator('#petBackBtn').click();
+  await p.locator('#petAway').waitFor({ state: 'hidden' });
+  await pressed(p, 'powerBtn', true);
+  assert.equal(await p.evaluate(() => fixture.paused), false);
+  assert.equal(await p.locator('#sayInput').inputValue(), 'Keep my draft');
+  assert.equal(await p.locator('#fsBtn').evaluate(e => e === document.activeElement), true);
+});
+
+test('failed desktop handoff restores the session and mic without losing the draft', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: localPet });
+  await p.route('**/api/pet/open', route => route.fulfill({ json: { ok: false, reason: 'Window failed' } }));
+  await p.locator('#powerBtn').click(); await pressed(p, 'powerBtn', true);
+  await p.locator('#micBtn').click(); await pressed(p, 'micBtn', true);
+  await p.locator('#sayInput').fill('Retry this');
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.waitForFunction(() => fixture.sockets.filter(s => s.url.includes('/ws/dialog')).length === 2);
+  await pressed(p, 'micBtn', true); await pressed(p, 'powerBtn', true);
+  assert.equal(await p.locator('#petAway').isHidden(), true);
+  assert.equal(await p.locator('#sayInput').inputValue(), 'Retry this');
+  await p.locator('#powerBtn').click(); await noTracks(p);
+});
+
+test('returning from the pet retries failures and notices when its native window closes', async t => {
+  const p = await open(t, undefined, 1, true, { petInfo: { ...localPet, running: true } });
+  await p.locator('#petAway').waitFor({ state: 'visible' });
+  let attempts = 0;
+  await p.route('**/api/pet/close', route => route.fulfill({ json: ++attempts === 1
+    ? { ok: false, reason: 'Window could not close' } : { ok: true, had_session: false } }));
+  await p.locator('#petBackBtn').click();
+  await p.waitForFunction(() => !petBackBtn.disabled);
+  assert.equal(await p.locator('#petAway').isVisible(), true);
+  assert.equal(await p.evaluate(() => fixture.paused), true);
+  await p.locator('#petBackBtn').click();
+  await p.locator('#petAway').waitFor({ state: 'hidden' });
+  assert.equal(attempts, 2);
+  assert.equal(await p.evaluate(() => fixture.paused), false);
+  await pressed(p, 'powerBtn', false);
+
+  const external = await open(t, undefined, 1, true, { petInfo: { ...localPet, running: true } });
+  await external.locator('#petAway').waitFor({ state: 'visible' });
+  await external.route('**/api/pet', route => route.fulfill({ json: localPet }));
+  await external.locator('#petAway').waitFor({ state: 'hidden' });
+  assert.equal(await external.evaluate(() => fixture.paused), false);
+  assert.equal(await external.locator('#fsBtn').evaluate(e => !e.closest('[inert]')), true);
+  await external.locator('#powerBtn').click(); await pressed(external, 'powerBtn', true);
+});
+
+test('desktop pet setup dismisses and retries; remote pages do not expose host controls', async t => {
+  const remote = await open(t, { width: 412, height: 915 }, 1, true);
+  await remote.locator('#fsBtn').click();
+  assert.equal(await remote.locator('#petBtn').isHidden(), true);
+  const p = await open(t, { width: 412, height: 915 }, 1, true, { petInfo: { ...localPet, installed: false } });
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.locator('#petSetup').waitFor({ state: 'visible' });
+  assert.equal(await p.locator('#petInstallBtn').evaluate(e => e === document.activeElement), true);
+  await p.keyboard.press('Escape');
+  assert.equal(await p.locator('#petSetup').isHidden(), true);
+  assert.equal(await p.locator('#fsBtn').evaluate(e => e === document.activeElement), true);
+  await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+  await p.route('**/api/pet/install', route => route.fulfill({ json: { ok: false, reason: 'Install failed' } }));
+  await p.locator('#petInstallBtn').click();
+  await p.waitForFunction(() => !petInstallBtn.disabled && petInstallBtn.textContent === 'Install and open');
+  assert.equal(await p.locator('#petSetup').isVisible(), true);
+  await p.locator('#petInstallNo').click();
+  assert.equal(await p.locator('#petSetup').isHidden(), true);
+});
+
+test('native pet handover takes over power and microphone once with a pet-owned socket', async t => {
+  const p = await open(t, { width: 320, height: 560 }, 1, true,
+    { pet: true, host: true, handover: { power: true, mic: true } });
+  await pressed(p, 'powerBtn', true); await pressed(p, 'micBtn', true);
+  assert.equal(await p.evaluate(() => fixture.sockets.find(s => s.url.includes('/ws/dialog')).url.endsWith('?pet=1')), true);
+  assert.equal(await p.evaluate(() => fixture.hostCalls.filter(c => c[0] === 'handover').length), 1);
+  await p.locator('#powerBtn').click(); await noTracks(p);
 });
 
 test('scene, expand menu, and transcript dismiss with focus restored; draft text survives', async t => {
