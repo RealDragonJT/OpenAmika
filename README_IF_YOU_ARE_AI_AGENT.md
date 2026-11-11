@@ -683,6 +683,15 @@ envs\brain\Scripts\python.exe scripts\setup_tts.py
 envs\brain\Scripts\python.exe launch.py --check
 ```
 
+A clone from before 2026-11-09 (the `v1.0.0` tag included) has neither `Update_OpenAmika.bat` nor the script. The
+person's way there, once (README "Updating her"): `git fetch origin`, then
+`git show origin/main:scripts/update_openamika.ps1 > scripts\update_once.ps1`, then
+`powershell -ExecutionPolicy Bypass -File scripts\update_once.ps1`. The copy has to be in `scripts\` (the script takes
+the parent of its own folder as her folder) and under a name the update does not bring (git does not pull over an
+untracked file of the same name); it stays behind, untracked. Prefer it to the three git commands above for such a
+clone: when `git stash pop` conflicts in `config/build_f.json` (the person changed a line next to one the update
+adds), the file is left with conflict markers and is not JSON any more.
+
 - After onboarding, tracked files hold the person's choices: `config/build_f.json` (name, city, her clock),
   `config/word_replace.json` (the pronunciation rule for their name), `config/llm_roles.json` (Setup → Brain) and
   `brain/表层.txt`, `例子.txt`, `思考.txt`, `scenes.json` (Setup → Personality). A plain `git pull` stops on them
@@ -945,20 +954,23 @@ depends on it, and it adds no feature of its own: same page, same dialog socket,
     first asks to enable spoken replies. Cancel keeps its media and draft untouched; acceptance passes
     `voice_output: true` through `--voice-output` before the pet connects. Only a successful move updates the web
     toggle, so a failure restores the muted session and a successful return retains the accepted choice.
-    Audio labels travel through the
-    child's `AMIKA_PET_AUDIO` environment variable; IDs are profile-specific. WebView2 grants host microphone
-    permission without capture so device enumeration works even with the mic off. The page requires a unique
-    label match, applies its own input/output IDs, and calls `handover_done()` after routing succeeds. Missing or
-    ambiguous devices, failed output routing, or failed mic capture close the window and restore the browser
-    session; a requested mic never silently falls back during the move. `open` waits up to 25 s for this
-    acknowledgement. Without an audio transfer, a window that at least exists still counts as open after 25 s.
-    Otherwise the process is stopped and the answer names `logs/pet.log`. `--close-with`
-    closes the window when the gateway's process ends, so a stopped OpenAmika leaves no window behind.
+    Audio labels travel through the child's `AMIKA_PET_AUDIO` environment variable; IDs are profile-specific. A
+    selection that the tab cannot name (its ID is not in `enumerateDevices()`, or its label is hidden until a media
+    permission is given) travels as an empty label, which is System default: the tab says so after the move and
+    keeps its saved selection. WebView2 grants host microphone permission without capture so device enumeration
+    works even with the mic off. Her page in the window requires a unique label match, applies its own input/output
+    IDs, and calls `handover_done()` after routing succeeds. Missing or ambiguous devices, failed output routing, or
+    failed mic capture close the window and restore the browser session; a named mic never silently falls back
+    during the move. `open` waits up to 25 s for this acknowledgement. Without an audio transfer, a window that at
+    least exists still counts as open after 25 s. Otherwise the process is stopped and the answer names
+    `logs/pet.log`. `--close-with` closes the window when the gateway's process ends, so a stopped OpenAmika leaves
+    no window behind.
   - *While she is out*: the tab shows "Amika is on your desktop" (`.stage-area.pet-away`: its render loop is paused
-    with `avatar.setPaused`, the camera is stopped, the top bar is hidden) and asks `GET /api/pet` every 2.5 s, since
-    her window can also close by itself; the tab then rests, it does not connect by itself. A tab that tries to
-    connect meanwhile gets `{"type": "ai_error", "code": "pet_session"}` and close code 1008 instead of the "another
-    tab" message.
+    with `avatar.setPaused`, the camera is stopped, the top bar is hidden; keyboard focus rests on that title, one
+    Tab before **Bring her back here**, so a stray Space or Enter does not call her back) and asks `GET /api/pet`
+    every 2.5 s, since her window can also close by itself; the tab then rests, it does not connect by itself. A tab
+    that tries to connect meanwhile gets `{"type": "ai_error", "code": "pet_session"}` and close code 1008 instead
+    of the "another tab" message.
   - *The way back*: `close` answers `had_session`; the tab connects again only when she was on in her window. The
     microphone is not carried back (a browser tab needs a click for it). A window that an elevated process started
     cannot be closed by a gateway that runs as the normal user: the answer says so (`Her window was started as
@@ -1276,8 +1288,9 @@ damaged packages, the ZIP's nested folder and the cd line, the Hugging Face toke
 downloads, Python 3.11 / 3.12 / 3.13), the launcher's ports (`tests/test_launch_ports.py`: a bind not a connect,
 WinError 10013, the excluded ranges, a reserved port moved in `settings.json`, the window that stays open after a
 failure), what her voice reads (`tests/test_tts_text.py`), the OpenRouter balance, catalog check and provider lines
-(`tests/test_openrouter_feedback.py`), `Update_OpenAmika.bat` (`tests/test_update_script.py`), the SenseVoice
-downloader, and `setup_tts.py` against a local stand-in for Hugging Face
+(`tests/test_openrouter_feedback.py`), `Update_OpenAmika.bat` (`tests/test_update_script.py`: static checks, and a
+throwaway clone from before the script existed, updated with the README's three lines, with and without a file both
+sides changed), the SenseVoice downloader, and `setup_tts.py` against a local stand-in for Hugging Face
 (`tests/test_setup_tts.py`: public, private with and without a token, the CDN and a mirror never seeing the token,
 resume, verify, repair, `--from-dir` (also a copy without the doll), banks.json, the paper doll at its own revision
 and before it is pinned).

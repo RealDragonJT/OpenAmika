@@ -6,7 +6,7 @@
 
 **Hi! I'm Amika** — MekaHime's AI companion, open source
 
-[简体中文](README.zh-CN.md) | [日本語](README.ja.md) | **English** | [Tiếng Việt](README.vi.md)
+[简体中文](README.zh-CN.md) | [日本語](README.ja.md) | **English** | [Tiếng Việt](README.vi.md) | [한국어](README.ko.md)
 
 [![Made with Love](https://img.shields.io/badge/Made%20with-Love-ff69b4)](https://www.mekahime.com/openamika)
 [![GitHub](https://img.shields.io/badge/GitHub-zeekk0%2FOpenAmika-181717?logo=github)](https://github.com/zeekk0/OpenAmika)
@@ -31,6 +31,9 @@ about 40 GB of free disk?
 
 - **Yes** → STEP 1.
 - **No** → talk to her in your browser instead: [mekahime.com/amika](https://www.mekahime.com/amika).
+
+**Rather watch it?** The same 7 steps as a 3-minute video, with fixes and answers for when you get stuck:
+[mekahime.com/openamikatutorial](https://www.mekahime.com/openamikatutorial).
 
 ### STEP 1 — Install Python 3.11 and Git
 
@@ -161,6 +164,24 @@ You see: `Updated. Start her: double-click Start_OpenAmika.bat`.
 
 - If you see `She is running` → STEP 1 first.
 - If it lists files "with your own changes" → your version is kept. Her memory is safe.
+
+**No `Update_OpenAmika.bat` in her folder?** You installed her before v1.1.0 (9 November 2026). Do STEP 2 this
+way, one time. Open her folder, right-click an empty spot → **Open in Terminal** (Windows 10: click the folder's
+address bar, type `powershell`, press **Enter**). Paste each line and press **Enter**:
+
+```powershell
+git fetch origin
+```
+
+```powershell
+git show origin/main:scripts/update_openamika.ps1 > scripts\update_once.ps1
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\update_once.ps1
+```
+
+It is the same update, with the same backup. After it, `Update_OpenAmika.bat` is in her folder.
 
 **I downloaded the ZIP**
 
@@ -350,7 +371,9 @@ If **Voice output** is off, she asks before moving: **Enable and move** turns sp
 move, spoken replies stay enabled when you bring her back to the browser.
 
 The microphone and audio output selected in the web page carry over to her desktop window. Hover the microphone
-for its input name, or power for the output name. If a named device is unavailable or ambiguous, the move fails
+for its input name, or power for the output name. A selected device that the page cannot find (unplugged, or the
+browser has not been allowed to read device names yet) moves as System default, and the page tells you; the
+selection itself stays saved. If her desktop window cannot find a named device, or finds it twice, the move fails
 and the browser session is restored. System default stays System default. The webcam switches off after a
 successful move; bring her back and enable it again when you want to use it. Pet controls keep their softer styling.
 

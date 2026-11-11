@@ -9,7 +9,7 @@
 
 Amikaは、声とテキストでリアルタイムにおしゃべりしてくれるLive2Dのアニメ少女です。あなたのことを覚えていて、あなたの街で一緒に暮らしています。動くのはあなた自身のPCの上で、OpenRouterを使うことも、Ollamaで完全ローカルにすることもできます。ホスト版も[mekahime.com/amika](https://www.mekahime.com/amika)で動いています。
 
-[简体中文](README.zh-CN.md) | **日本語** | [English](README.md) | [Tiếng Việt](README.vi.md)
+[简体中文](README.zh-CN.md) | **日本語** | [English](README.md) | [Tiếng Việt](README.vi.md) | [한국어](README.ko.md)
 
 [![Made with Love](https://img.shields.io/badge/Made%20with-Love-ff69b4)](https://www.mekahime.com/openamika)
 [![GitHub](https://img.shields.io/badge/GitHub-zeekk0%2FOpenAmika-181717?logo=github)](https://github.com/zeekk0/OpenAmika)
@@ -33,6 +33,8 @@ Amikaは、声とテキストでリアルタイムにおしゃべりしてくれ
 
 - **はい** → STEP 1 へ。
 - **いいえ** → ブラウザーで彼女と話せます：[mekahime.com/amika](https://www.mekahime.com/amika)。
+
+**動画で見たい？** 同じ7つのステップを3分の動画にしました。よくある質問と対処法もあります（英語のページ）：[mekahime.com/openamikatutorial](https://www.mekahime.com/openamikatutorial)。
 
 ### STEP 1 — Python 3.11 と Git をインストール
 
@@ -147,6 +149,22 @@ envs\brain\Scripts\python.exe scripts\setup_tts.py
 
 - `She is running` → 先に STEP 1。
 - 「with your own changes」としてファイルが並んだら → あなたの版が残っています。彼女の記憶は無事です。
+
+**彼女のフォルダーに `Update_OpenAmika.bat` がない？** v1.1.0（2026年11月9日）より前にインストールした場合です。今回だけ、STEP 2 を次のようにします。彼女のフォルダーを開き、何もないところを右クリック → **ターミナルで開く**（Windows 10：フォルダーのアドレスバーをクリックし、`powershell` と入力して **Enter**）。次の行を1行ずつ貼り付けて **Enter**：
+
+```powershell
+git fetch origin
+```
+
+```powershell
+git show origin/main:scripts/update_openamika.ps1 > scripts\update_once.ps1
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\update_once.ps1
+```
+
+アップデートの内容もバックアップも同じです。これが終わると、彼女のフォルダーに `Update_OpenAmika.bat` が入ります。
 
 **ZIPをダウンロードした場合**
 

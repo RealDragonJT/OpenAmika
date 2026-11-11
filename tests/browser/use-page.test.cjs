@@ -342,12 +342,16 @@ test('idle native handoff retains voice-output choice until power is switched on
 
 test('desktop pet handoff releases media, retains draft, and returns to the browser', async t => {
   const p = await open(t, undefined, 1, true, { petInfo: localPet });
+  let out = false, closes = 0;
+  // Her window stays open until the page closes it, so the 2.5 s status poll cannot end the away state early.
+  await p.route('**/api/pet', route => route.fulfill({ json: { ...localPet, running: out } }));
   await p.route('**/api/pet/open', async route => {
     assert.deepEqual(route.request().postDataJSON(), { power: true, mic: true, voice_output: true, audio: { mic: '', speaker: '' } });
     assert.equal(route.request().headers()['x-build-f-action'], 'open-pet');
+    out = true;
     await route.fulfill({ json: { ok: true } });
   });
-  await p.route('**/api/pet/close', route => route.fulfill({ json: { ok: true, had_session: true } }));
+  await p.route('**/api/pet/close', route => { closes++; out = false; return route.fulfill({ json: { ok: true, had_session: true } }); });
   await p.locator('#powerBtn').click(); await pressed(p, 'powerBtn', true);
   await p.locator('#micBtn').click(); await pressed(p, 'micBtn', true);
   await p.locator('#camBtn').click(); await pressed(p, 'camBtn', true);
@@ -356,12 +360,18 @@ test('desktop pet handoff releases media, retains draft, and returns to the brow
   await p.locator('#petAway').waitFor({ state: 'visible' });
   await noTracks(p);
   assert.equal(await p.evaluate(() => fixture.paused), true);
-  assert.equal(await p.locator('#petBackBtn').evaluate(e => e === document.activeElement), true);
+  assert.equal(await p.locator('#petAwayTitle').evaluate(e => e === document.activeElement), true);
   const count = await p.evaluate(() => fixture.requests.length);
   await p.keyboard.press('m'); await p.keyboard.press('c');
   assert.equal(await p.evaluate(() => fixture.requests.length), count);
-  await p.locator('#petBackBtn').click();
+  // Focus rests on the title, one Tab before the button: a stray Space or Enter does not call her back.
+  await p.keyboard.press('Space'); await p.keyboard.press('Enter');
+  await p.keyboard.press('Tab');
+  assert.equal(await p.locator('#petBackBtn').evaluate(e => e === document.activeElement), true);
+  assert.equal(await p.locator('#petAway').isVisible(), true);
+  await p.keyboard.press('Enter');
   await p.locator('#petAway').waitFor({ state: 'hidden' });
+  assert.equal(closes, 1, 'only the button itself closes her window');
   await pressed(p, 'powerBtn', true);
   assert.equal(await p.evaluate(() => fixture.paused), false);
   assert.equal(await p.locator('#sayInput').inputValue(), 'Keep my draft');
@@ -452,6 +462,25 @@ test('web handoff sends device names rather than browser-specific IDs', async t 
   assert.deepEqual(received, { power: false, mic: false, voice_output: true, audio: { mic: 'USB microphone', speaker: 'Headphones' } });
 });
 
+test('a pick the page cannot name moves as the system default, with a notice, and stays saved', async t => {
+  const webDevices = petAudioDevices.map(d => ({ ...d, deviceId: d.deviceId.replace('native-', 'web-') }));
+  for (const [savedDevices, mediaDevices, audio, notice] of [
+    [{ mic: 'gone-mic' }, undefined, { mic: '', speaker: '' }, /microphone you picked was not found/],
+    [{ mic: 'gone-mic', speaker: 'web-speaker' }, webDevices, { mic: '', speaker: 'Headphones' }, /microphone you picked was not found/],
+    [{ mic: 'web-mic', speaker: 'web-speaker' }, webDevices.map(d => ({ ...d, label: '' })), { mic: '', speaker: '' },
+      /microphone and speaker you picked were not found/],
+  ]) {
+    const p = await open(t, undefined, 1, true, { petInfo: localPet, mediaDevices, savedDevices });
+    let received;
+    await p.route('**/api/pet/open', route => { received = route.request().postDataJSON(); return route.fulfill({ json: { ok: true } }); });
+    await p.locator('#fsBtn').click(); await p.locator('#petBtn').click();
+    await p.locator('#petAway').waitFor({ state: 'visible' });
+    assert.deepEqual(received, { power: false, mic: false, voice_output: true, audio });
+    assert.match(await p.locator('.oa-toast').textContent(), notice);
+    assert.equal(await p.evaluate(() => localStorage.getItem('openamika-micDevice')), savedDevices.mic);
+  }
+});
+
 test('native handoff resolves different device IDs before microphone capture and output', async t => {
   const p = await open(t, undefined, 1, true, { pet: true, host: true, mediaDevices: petAudioDevices,
     savedDevices: { mic: 'old-native-mic', speaker: 'old-native-speaker' },
@@ -540,6 +569,19 @@ test('scene, expand menu, and transcript dismiss with focus restored; draft text
   await p.keyboard.press('Escape');
   assert.equal(await p.locator('#drawer').isHidden(), true);
   assert.equal(await p.locator('#drawerBtn').evaluate(e => e === document.activeElement), true);
+});
+
+test('Escape on the donation dialog closes only the dialog; Fill window needs its own Escape', async t => {
+  const p = await open(t);
+  await p.locator('#fsBtn').click();
+  await p.locator('[data-mode="window"]').click();
+  // Kiosk mode never opens the dialog by itself: show it as its timer would.
+  await p.evaluate(() => { document.getElementById('donate-modal').hidden = false; });
+  await p.keyboard.press('Escape');
+  assert.equal(await p.locator('#donate-modal').isHidden(), true);
+  assert.equal(await p.locator('#stageArea').evaluate(e => e.classList.contains('u-big')), true);
+  await p.keyboard.press('Escape');
+  assert.equal(await p.locator('#stageArea').evaluate(e => e.classList.contains('u-big')), false);
 });
 
 test('rapid reconnect ignores stale socket callbacks and sends text once', async t => {
@@ -641,6 +683,44 @@ test('disconnect cancels pending microphone capture; permission denial can be re
   await pressed(p, 'micBtn', true);
   await p.locator('#micBtn').click();
   await noTracks(p);
+});
+
+test('a refused microphone switch turns the microphone off and the status says so', async t => {
+  const p = await open(t);
+  await p.locator('#powerBtn').click(); await pressed(p, 'powerBtn', true);
+  await p.locator('#micBtn').click(); await pressed(p, 'micBtn', true);
+  assert.equal(await p.locator('#powerState').textContent(), 'Listening');
+  await p.locator('#t-set').click();
+  await p.evaluate(() => { fixture.denyMedia = true; });
+  await p.locator('#micSelect').selectOption({ index: 1 });
+  await p.waitForFunction(() => document.querySelector('.oa-toast')?.textContent.includes('refused'));
+  await pressed(p, 'micBtn', false);
+  assert.equal(await p.locator('#powerState').textContent(), 'Online');
+  assert.equal(await p.locator('#powerDetail').textContent(), 'mic off');
+  await noTracks(p);
+  await p.evaluate(() => { fixture.denyMedia = false; });
+  await p.locator('#micBtn').click(); await pressed(p, 'micBtn', true);
+  assert.equal(await p.locator('#powerState').textContent(), 'Listening');
+  await p.locator('#micBtn').click(); await noTracks(p);
+});
+
+test('a microphone that cannot be wired up is closed again and can be retried', async t => {
+  const p = await open(t);
+  await p.evaluate(() => {
+    const create = AudioContext.prototype.createMediaStreamSource;
+    AudioContext.prototype.createMediaStreamSource = function() {
+      AudioContext.prototype.createMediaStreamSource = create;
+      throw new DOMException('Test source failure', 'InvalidStateError');
+    };
+  });
+  await p.locator('#micBtn').click();
+  await p.waitForFunction(() => document.querySelector('.oa-toast')?.textContent.includes('could not start'));
+  await pressed(p, 'micBtn', false);
+  await noTracks(p);
+  assert.equal(await p.evaluate(() => fixture.streams.length), 1);
+  assert.equal(await p.locator('#powerState').textContent(), 'Online');
+  await p.locator('#micBtn').click(); await pressed(p, 'micBtn', true);
+  await p.locator('#micBtn').click(); await noTracks(p);
 });
 
 test('an unplugged saved camera falls back to the default without losing its preference', async t => {
