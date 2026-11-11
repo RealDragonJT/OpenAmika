@@ -11,7 +11,7 @@ Amika là một cô gái anime Live2D, trò chuyện với bạn bằng giọng 
 và sống cùng bạn trong thành phố của bạn. Cô ấy chạy trên chính PC của bạn, dùng OpenRouter hoặc hoàn toàn cục bộ
 với Ollama. Một bản lưu trữ sẵn đang chạy tại [mekahime.com/amika](https://www.mekahime.com/amika).
 
-[简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [English](README.md) | **Tiếng Việt**
+[简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [English](README.md) | **Tiếng Việt** | [한국어](README.ko.md)
 
 [![Made with Love](https://img.shields.io/badge/Made%20with-Love-ff69b4)](https://www.mekahime.com/openamika)
 [![GitHub](https://img.shields.io/badge/GitHub-zeekk0%2FOpenAmika-181717?logo=github)](https://github.com/zeekk0/OpenAmika)
@@ -66,6 +66,9 @@ bằng tiếng đó (`llama3.3:70b`, chẳng hạn, thì không hỗ trợ). Cá
 [Tiện ích bổ sung](#tiện-ích-bổ-sung).
 
 ## Cài đặt cô ấy
+
+**Muốn xem video?** Hướng dẫn 7 bước kèm video 3 phút, cùng các câu hỏi thường gặp và cách khắc phục (trang tiếng
+Anh): [mekahime.com/openamikatutorial](https://www.mekahime.com/openamikatutorial).
 
 Mở PowerShell (cửa sổ thường, không chạy với quyền administrator) và chạy từng dòng một. Các lệnh này sẽ cài đặt
 cô ấy vào `C:\OpenAmika`, một thư mục đường dẫn ngắn mà OneDrive không đồng bộ:

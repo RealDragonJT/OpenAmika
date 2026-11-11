@@ -9,7 +9,7 @@
 
 Amika 是一个 Live2D 二次元少女：她能用语音和文字与你实时聊天，会记住你，还和你一起住在你所在的城市。她运行在你自己的电脑上，可以接入 OpenRouter，也可以借助 Ollama 完全本地运行。你也可以在 [mekahime.com/amika](https://www.mekahime.com/amika) 体验在线托管版。
 
-**简体中文** | [日本語](README.ja.md) | [English](README.md) | [Tiếng Việt](README.vi.md)
+**简体中文** | [日本語](README.ja.md) | [English](README.md) | [Tiếng Việt](README.vi.md) | [한국어](README.ko.md)
 
 [![Made with Love](https://img.shields.io/badge/Made%20with-Love-ff69b4)](https://www.mekahime.com/openamika)
 [![GitHub](https://img.shields.io/badge/GitHub-zeekk0%2FOpenAmika-181717?logo=github)](https://github.com/zeekk0/OpenAmika)
@@ -33,6 +33,8 @@ Amika 是一个 Live2D 二次元少女：她能用语音和文字与你实时聊
 
 - **有** → 从 STEP 1 开始。
 - **没有** → 直接在浏览器里和她聊：[mekahime.com/amika](https://www.mekahime.com/amika)。
+
+**想看视频？** 同样的 7 个步骤做成了 3 分钟的视频，还有常见问题和解决办法（英文页面）：[mekahime.com/openamikatutorial](https://www.mekahime.com/openamikatutorial)。
 
 ### STEP 1 — 安装 Python 3.11 和 Git
 
@@ -147,6 +149,22 @@ envs\brain\Scripts\python.exe scripts\setup_tts.py
 
 - 如果看到 `She is running` → 先做 STEP 1。
 - 如果它列出“with your own changes”的文件 → 保留的是你的版本。她的记忆是安全的。
+
+**她的文件夹里没有 `Update_OpenAmika.bat`？** 说明她是在 v1.1.0（2026 年 11 月 9 日）之前安装的。这一次请这样做 STEP 2：打开她的文件夹，在空白处右键 → **在终端中打开**（Windows 10：点文件夹的地址栏，输入 `powershell`，按 **回车**）。把下面每一行粘贴进去，按 **回车**：
+
+```powershell
+git fetch origin
+```
+
+```powershell
+git show origin/main:scripts/update_openamika.ps1 > scripts\update_once.ps1
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\update_once.ps1
+```
+
+更新的内容一样，备份也一样。做完之后，她的文件夹里就有 `Update_OpenAmika.bat` 了。
 
 **下载 ZIP 安装的**
 

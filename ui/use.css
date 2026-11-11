@@ -78,6 +78,8 @@ html:has(body.use-page) { background: #0e0a12; }
 .u-stage .stage-empty { z-index: 2; }
 .u-stage.pet-away > :not(#petAway) { visibility: hidden; }
 .u-stage .pet-away-note { border-radius: inherit; }
+/* focus rests on this title while she is out (not on the button below it); a title is no control, so no ring */
+.u-stage .pet-away-note .big:focus-visible { outline: none; }
 .u-stage #petSetup, .u-stage #petVoice { width: min(300px, calc(100% - 32px)); }
 .u-stage .pet-setup .title { font-weight: 700; }
 .u-stage .pet-setup .note { color: var(--u-muted); font-size: 13px; line-height: 1.5; }

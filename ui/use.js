@@ -77,7 +77,10 @@
       toast("okay — we won't ask again");
     });
     donateModal.addEventListener("click", (e) => { if (e.target === donateModal) hideDonate(); });
-    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !donateModal.hidden) hideDonate(); });
+    // this Escape is used up here (preventDefault): the stage's own Escape, below, would also leave Fill window
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !donateModal.hidden) { e.preventDefault(); hideDonate(); }
+    });
     const armDonate = () => setTimeout(() => showDonate("first"), DONATE_FIRST_MS);
     if (document.readyState === "complete") armDonate(); else window.addEventListener("load", armDonate, { once: true });
     setInterval(() => { if (!document.hidden) showDonate("interval"); }, DONATE_EVERY_MS);
@@ -678,6 +681,7 @@
   let ws = null, wsWanted = false, reconnectTimer = null;
   let micActive = false, micStream = null, micCtx = null, micSrc = null, micNode = null;
   let micStarting = false, micRequest = 0;
+  let micShown = false;   // the status was last painted with the microphone live (a silent stop leaves it showing)
   let petAudioNames = null;
   // she is out in her desktop pet window (the "Desktop pet" button, below): this page rests until she is back
   let petOut = false;
@@ -687,6 +691,7 @@
   let ttsTurnBase = "";
 
   function setPowerUI(state, detail) {
+    micShown = micActive;
     $("powerState").textContent = state;
     $("powerDetail").textContent = detail || "";
     const on = state === "Online" || state === "Listening";
@@ -834,6 +839,13 @@ registerProcessor('pcm-pusher', PCMPusher);`;
     return URL.createObjectURL(new Blob([code], { type: "application/javascript" }));
   }
 
+  // A start that fails leaves no open microphone behind. After a silent stop (a device switch) the status still says
+  // that the microphone is live, so it is painted again; a first start leaves the status as it is.
+  function micFailed(message) {
+    toast(message, true);
+    stopMic(!micShown);
+  }
+
   async function startMic(strictDevice = false) {
     if (micActive || micStarting) return;
     const request = ++micRequest;
@@ -845,7 +857,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
         audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
       }, strictDevice);
     } catch (error) {
-      if (request === micRequest) { micStarting = false; toast("Microphone was refused: " + error.message, true); }
+      if (request === micRequest) micFailed("Microphone was refused: " + error.message);
       return;
     }
     if (request !== micRequest) { stream.getTracks().forEach((t) => t.stop()); return; }
@@ -856,23 +868,28 @@ registerProcessor('pcm-pusher', PCMPusher);`;
       catch (_) { micCtx = new (window.AudioContext || window.webkitAudioContext)(); }
       await micCtx.audioWorklet.addModule(moduleURL);
     } catch (error) {
-      if (request === micRequest) { toast("AudioWorklet failed: " + error.message, true); stopMic(true); }
+      if (request === micRequest) micFailed("AudioWorklet failed: " + error.message);
       return;
     } finally { URL.revokeObjectURL(moduleURL); }
     if (request !== micRequest) return;
-    micSrc = micCtx.createMediaStreamSource(micStream);
-    micNode = new AudioWorkletNode(micCtx, "pcm-pusher", {
-      processorOptions: { sourceRate: micCtx.sampleRate, targetRate: TARGET_SR, frameSize: 512 },
-    });
-    micNode.port.onmessage = (ev) => {
-      if (ws && ws.readyState === 1) { try { ws.send(ev.data); } catch (_) {} }
-    };
-    micSrc.connect(micNode);
-    const silent = micCtx.createGain();
-    silent.gain.value = 0;
-    micNode.connect(silent).connect(micCtx.destination);
-    if (ws && ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: "hello", sample_rate: TARGET_SR, source_rate: micCtx.sampleRate }));
+    try {
+      micSrc = micCtx.createMediaStreamSource(micStream);
+      micNode = new AudioWorkletNode(micCtx, "pcm-pusher", {
+        processorOptions: { sourceRate: micCtx.sampleRate, targetRate: TARGET_SR, frameSize: 512 },
+      });
+      micNode.port.onmessage = (ev) => {
+        if (ws && ws.readyState === 1) { try { ws.send(ev.data); } catch (_) {} }
+      };
+      micSrc.connect(micNode);
+      const silent = micCtx.createGain();
+      silent.gain.value = 0;
+      micNode.connect(silent).connect(micCtx.destination);
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: "hello", sample_rate: TARGET_SR, source_rate: micCtx.sampleRate }));
+      }
+    } catch (error) {
+      micFailed("Microphone could not start: " + error.message);
+      return;
     }
     micActive = true;
     micStarting = false;
@@ -963,19 +980,23 @@ registerProcessor('pcm-pusher', PCMPusher);`;
   });
 
   // IDs are private to a browser profile/origin. Transfer exact device names, then resolve this WebView's own IDs.
+  // A pick that this browser cannot name now (not connected, or the names are hidden until a permission is given)
+  // goes over as the system default, as it does for the microphone on this page; `missing` lists those picks.
   async function audioForPet() {
     const selections = { mic: devices.get("mic"), speaker: devices.get("speaker") };
-    const list = Object.values(selections).some(Boolean) ? await navigator.mediaDevices.enumerateDevices() : [];
-    const audio = {};
-    for (const [kind, id] of Object.entries(selections)) {
-      if (!id || id === "default") { audio[kind] = ""; continue; }
-      const device = list.find(d => d.kind === (kind === "mic" ? "audioinput" : "audiooutput") && d.deviceId === id);
-      if (!device?.label || device.label.length > 256) {
-        throw new Error(`Select an available ${kind === "mic" ? "microphone" : "audio output"} in Settings before moving her.`);
-      }
-      audio[kind] = device.label;
+    let list = [];
+    if (Object.values(selections).some(Boolean)) {
+      try { list = await navigator.mediaDevices.enumerateDevices(); } catch (_) {}
     }
-    return audio;
+    const audio = {}, missing = [];
+    for (const [kind, id] of Object.entries(selections)) {
+      audio[kind] = "";
+      if (!id || id === "default") continue;
+      const device = list.find(d => d.kind === (kind === "mic" ? "audioinput" : "audiooutput") && d.deviceId === id);
+      if (device?.label && device.label.length <= 256) audio[kind] = device.label;
+      else missing.push(kind === "mic" ? "microphone" : "speaker");
+    }
+    return { audio, missing };
   }
 
   async function applyPetAudio(audio) {
@@ -1049,7 +1070,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
       closePopovers();
       drawerOpen(false);
       if (camActive || camStarting) camStop(true); // also cancel a pending permission request
-      $("petBackBtn").focus();
+      $("petAwayTitle").focus();                   // not the button: a stray Space or Enter must not call her back
       petTimer = setInterval(() => refreshPet(true), 2500);     // her window can also close by itself
     } else $("fsBtn").focus();
     if (!wsWanted) setPowerUI("Offline", offHint());
@@ -1082,9 +1103,7 @@ registerProcessor('pcm-pusher', PCMPusher);`;
   async function sendToDesktop(enableVoice = false) {
     const voice_output = $("voiceOutToggle").checked || enableVoice;
     if (!voice_output) { showPetVoice(true); return; }
-    let audio;
-    try { audio = await audioForPet(); }
-    catch (error) { toast(error.message, true); return; }
+    const { audio, missing } = await audioForPet();
     const wasOn = wsWanted, wasMic = micActive || micStarting;
     closePopovers();
     if (bigMode) exitBig();
@@ -1099,6 +1118,10 @@ registerProcessor('pcm-pusher', PCMPusher);`;
       $("voiceOutToggle").checked = voice_output;  // commit the accepted choice only after a successful move
       if (petInfo) petInfo.running = true;
       setPetOut(true);
+      if (missing.length) {
+        toast(`The ${missing.join(" and ")} you picked ${missing.length > 1 ? "were" : "was"} not found — ` +
+          "her desktop window uses the system default.", true);
+      }
       return;
     }
     if (result && result.code === "not_installed") showPetSetup(true);
