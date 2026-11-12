@@ -982,6 +982,12 @@ depends on it, and it adds no feature of its own: same page, same dialog socket,
   = none so Windows 11 draws no backdrop material there). DWM then composes it with per-pixel alpha: the desktop
   shows wherever the page is transparent and her soft edges blend. A colour key (`TransparencyKey`) does not work
   (WebView2's own surface stays dark grey there), and an Edge `--app` window has no transparent mode at all.
+  `PetTransparency` keeps that setup for the form's lifetime: it removes this form's pywebview preference handler
+  (6.2.1 otherwise re-enables Mica in dark mode), queues UI-thread repairs after preference/display changes,
+  resume, unlock/reconnect and handle creation, and detaches its events on disposal. This does not rely on
+  `WM_DWMCOMPOSITIONCHANGED`, which is insufficient for modern Windows resume. Offline lifecycle tests are in
+  `tests/test_pet_transparency.py`; the opt-in hidden Windows probe and physical acceptance steps are described
+  in [docs/PET_TRANSPARENCY_TESTING.md](docs/PET_TRANSPARENCY_TESTING.md).
 - **The page** (`<html class="pet">` from an inline script in `use.html`'s head, before the first paint; `use.js`
   "desktop pet"; `openamika.css` `html.pet`): the stage leaves the hidden page layout before her model loads; no nav,
   footer, stage top bar, subtitles, background photo, camera preview, speech bubbles or paper doll, and no first-run
