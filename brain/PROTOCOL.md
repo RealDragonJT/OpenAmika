@@ -200,3 +200,17 @@ type DeepDoneOut      = TurnMeta & { speech: string; raw: string };
 type ErrorOut         = Partial<TurnMeta> & { message: string };
 type EndOut           = TurnMeta;
 ```
+
+## Experimental single reply for text channels
+
+`message` accepts optional `single_reply: true`, honored only with `channel: "discord"` or
+`channel: "telegram"`. Omitted/false preserves the original behavior. `voice: false` alone does not
+activate it: the stage is unchanged. The flag is captured per turn, not read from a global brain setting.
+
+The surface judges while the deep generates without a blurt (sequential when either role uses Ollama).
+Experimental turns omit `surface_chunk`; `surface_done` keeps its existing shape, but `reply` is empty
+for `think` / `say+think`. Its `raw` is diagnostic model output, never speech. A failed/unparseable surface
+emits an empty-reply `surface_done` with mode `think`. No `deep_chunk` or `deep_done` is emitted until
+the verdict selects deep; a `say` verdict cancels the speculative request without cancelling the turn.
+The existing `error`, `end`, `protect` and `speech_done` contracts remain in place. Long text replies
+may still be split by the messenger to fit platform limits.

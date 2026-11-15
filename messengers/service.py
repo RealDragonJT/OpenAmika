@@ -9,8 +9,9 @@ config/messengers.json, and a small HTTP API on 127.0.0.1:5215 for the Setup pag
   POST /api/config         save settings from the Setup page; bots start/stop/restart to match
   POST /api/text {text}    a local text channel: her replies to one message, as JSON (scripts, checks)
 
-Text only: no TTS, no stage. A message from an allowed user becomes one brain turn; her quick line
-(surface) and her real reply (deep) go out as plain messages, split to the platform's limit. The turn is
+Text only: no TTS, no stage. A message from an allowed user becomes one brain turn; by default her quick
+line (surface) and her real reply (deep) go out as plain messages, split to the platform's limit. With
+single_reply enabled, Discord/Telegram turns ask the brain to choose one reply without a filler. The turn is
 "protected" in the brain once her first message is delivered (what the first TTS audio does on stage).
 Turns she starts herself (a reflection making her speak first, a helper's result) reach the chat she last
 talked in. Her commands are serialized: one turn at a time, in the order the messages came.
@@ -182,7 +183,10 @@ class BrainLink:
 
     async def send(self, text, turn_id, context, channel=""):
         # channel: the platform name — the brain picks her "on the phone" scene for text turns
-        await self.sio.emit("message", {"text": text, "turn_id": turn_id, "context": context, "channel": channel})
+        payload = {"text": text, "turn_id": turn_id, "context": context, "channel": channel}
+        if channel in ("discord", "telegram") and self.service.cfg.get("single_reply") is True:
+            payload["single_reply"] = True
+        await self.sio.emit("message", payload)
 
     async def protect(self):
         try:

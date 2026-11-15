@@ -221,3 +221,45 @@ def test_bot_hints_unknown_senders_once_an_hour():
 @pytest.mark.parametrize("platform,limit", [("discord", 2000), ("telegram", 4096)])
 def test_platform_limits(platform, limit):
     assert core.LIMITS[platform] == limit
+
+
+def test_single_reply_setting_defaults_round_trips_and_preserves_other_settings(tmp_path):
+    cfg = core.default_config()
+    assert cfg['single_reply'] is False
+    cfg['discord']['token'] = 'keep-this-token'
+    updated = core.apply_update(cfg, {'single_reply': True})
+    core.save_config(updated, tmp_path / 'm.json')
+    restored = core.load_config(tmp_path / 'm.json')
+    assert restored['single_reply'] is True and restored['discord']['token'] == 'keep-this-token'
+    assert core.public_view(restored)['single_reply'] is True
+    assert core.apply_update(restored, {'telegram': {'allowed_users': '123'}})['single_reply'] is True
+    assert core.apply_update(restored, {'single_reply': False})['single_reply'] is False
+
+
+@pytest.mark.parametrize('channel', ['discord', 'telegram', 'local', ''])
+@pytest.mark.parametrize('enabled', [False, True])
+def test_brain_payload_single_reply_flag(channel, enabled):
+    from types import SimpleNamespace
+    async def scenario():
+        sent = []
+        async def emit(event, payload):
+            sent.append(payload)
+        link = service.BrainLink(SimpleNamespace(cfg={'single_reply': enabled}))
+        link.sio = SimpleNamespace(emit=emit)
+        await link.send('hello', 'test', 'context', channel=channel)
+        assert sent[0].get('single_reply', False) == (enabled and channel in ('discord', 'telegram'))
+    asyncio.run(scenario())
+
+
+def test_one_reply_outbox_acknowledges_only_chosen_text():
+    async def scenario():
+        svc, chat = FakeService(), FakeChat()
+        turn = service.Turn('one', chat)
+        svc.outbox.turns['one'] = turn
+        await svc.outbox.on_event('surface_done', {'turn_id': 'one', 'mode': 'think', 'reply': '', 'raw': 'reply: filler'})
+        assert chat.out == [] and svc.brain.protected == 0
+        await svc.outbox.on_event('deep_done', {'turn_id': 'one', 'speech': 'Full answer.'})
+        assert chat.out == ['Full answer.'] and svc.brain.protected == 1
+        await svc.outbox.on_event('end', {'turn_id': 'one'})
+        assert svc.brain.spoken == ['one']
+    asyncio.run(scenario())

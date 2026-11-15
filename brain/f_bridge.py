@@ -689,7 +689,10 @@ def install(g):
             finally:
                 try:
                     if tele is not None:tele.mark_native(ident,first_ms,last_ms,usage or None)
-                    meter.finish(ident,usage=usage or None,status='complete' if complete else 'cancelled' if not error else 'unknown',error=error)
+                    status='complete' if complete else 'cancelled' if not error else 'unknown'
+                    finish_status=getattr(getattr(local,'cancel',None),'finish_status',None)
+                    if finish_status is not None:status=finish_status(status)
+                    meter.finish(ident,usage=usage or None,status=status,error=error)
                 finally:
                     if response is not None:
                         with contextlib.suppress(Exception):response.close()
@@ -765,6 +768,20 @@ def install(g):
             parts['_f_phase'],parts['_f_turn_id']=_phase,getattr(local,'turn_id','')
             return parts
         g[name]=builder
+
+    def prepare_text_deep(parts,config,cancel):
+        captured=local.__dict__.copy()
+        def stream():
+            old=local.__dict__.copy()
+            local.__dict__.update(captured)
+            local.cancel=cancel
+            try:
+                with drain_scope(None):
+                    yield from g['_pick_stream'](parts,config)
+            finally:
+                local.__dict__.clear();local.__dict__.update(old)
+        return stream
+    g['_prepare_text_deep']=prepare_text_deep
 
     run=g['_ws_run_generation']
     def generation(sid,turn_id,text,model_key,deep_model_key,entry):

@@ -1,8 +1,7 @@
 # Text her — Discord & Telegram
 
 `messengers/service.py` lets you text Amika from a Discord bot or a Telegram bot. **Words only**: no
-voice, no stage. Her quick line and her real reply arrive as two ordinary messages, the way a person
-texts twice. launch.py starts the service next to the speech gateway; its row on the launcher says which
+voice, no stage. By default, her quick line and her real reply arrive as two ordinary messages. launch.py starts the service next to the speech gateway; its row on the launcher says which
 bots are online, or that none is set up yet.
 
 ## Set it up (Setup page → *Text her*)
@@ -25,6 +24,39 @@ bots are online, or that none is set up yet.
 
 Nothing privileged is requested from Discord: DMs and @mentions carry their text without the
 "message content" intent.
+
+## Experimental: one reply per text message
+
+In Setup → **Text her**, enable **Experimental** and click **Save & connect**. This saves
+`"single_reply": true` in `config/messengers.json`; it defaults to false. Existing files without the key
+keep the original behavior. The messengers service adds `single_reply: true` only to Discord/Telegram
+turns. No brain restart is needed when changing the toggle.
+
+With it on, the surface and deep start together. The deep is built without a spoken filler and its
+output is held until the surface's verdict. For `say`, only the surface reply is sent and the speculative
+deep request is cancelled (the turn stays). For `say+think` or `think`, only the deep reply is sent;
+the surface line is not recorded as speech in history, memory or the post-turn tools clerk. A failed
+or unparseable surface falls back to deep; a selected deep failure uses the usual error message.
+Quiet outcomes retain the existing surface parser rules. If either role uses Ollama, the surface runs
+first and the deep runs only when needed, still without a filler.
+
+This selects one reply per turn. Long replies still use the platform-limit splitting described below.
+The stage, including voice-off stage turns, the local text API and proactive turns are unchanged.
+Turning the setting off restores the original sequential surface-then-deep behavior.
+
+For a live check with cloud models, DM `hey`, then ask a substantive question. Expect one quick
+surface reply to the greeting and one full deep answer to the question, without a filler. The brain log
+prints `[Hane] text single reply <turn_id>: parallel`, followed by `mode=say; surface selected; deep
+cancelled` or `mode=think` / `mode=say+think; deep selected`. Surface failure logs `surface failed` and
+`using deep`. Ollama logs `sequential` and `deep skipped` for a surface-only reply.
+
+In the usage panel and `memory_f/<provider>_receipts/`, the surface request completes normally.
+For the greeting the same turn's deep request has status `cancelled`, without discarding the turn or
+draining the unwanted answer. If the provider finishes first, receipt settlement waits for the verdict;
+a rejected answer is still marked cancelled, retaining any usage the provider reported. An in-flight
+request settles when its reader exits (the next stream event or transport timeout). The full answer's
+deep request completes normally. Protect and speech_done still acknowledge the reply actually sent;
+only then may the brain archive it.
 
 ## Who may text her
 

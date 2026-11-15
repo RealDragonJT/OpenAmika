@@ -270,8 +270,13 @@
       Text her from your phone — words only, no voice. Make a bot, paste its token, put <b>your own user id</b> on
       the allow list, and she answers that bot's DMs (in a Discord server: when @mentioned). Anyone not on the list
       is told their id so you can add them. Tokens stay in <code>config/messengers.json</code> on this computer.
-      Her quick line and her real reply arrive as two messages; when she speaks first, it goes to the chat you last used.
+      When she speaks first, it goes to the chat you last used.
     </p>
+    <label style="display:flex;align-items:center;gap:10px;font-weight:600;margin-bottom:12px;">
+      <span class="switch"><input type="checkbox" id="msgSingleReply" aria-describedby="msgSingleReplyHint"><span class="track"></span></span>
+      Experimental
+      <span class="card-hint" id="msgSingleReplyHint">One reply per text message, without a filler.</span>
+    </label>
     <div id="msgRows"><div class="card-hint">Checking…</div></div>
     <div class="oa-grid cols-2" style="margin-top:16px;">
       <div>

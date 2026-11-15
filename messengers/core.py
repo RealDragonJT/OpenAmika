@@ -30,7 +30,7 @@ _FIELD_LINE_RE = re.compile(r"^\s*(status|tone|mode|reply)\s*[:：]\s*", re.I)  
 
 # ───────────────────────────── config ─────────────────────────────
 def default_config() -> dict:
-    return {"discord": {"enabled": False, "token": "", "allowed_users": []},
+    return {"single_reply": False, "discord": {"enabled": False, "token": "", "allowed_users": []},
             "telegram": {"enabled": False, "token": "", "allowed_users": []},
             "state": {"last_chat": None}}
 
@@ -45,6 +45,7 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
         return cfg
     if not isinstance(raw, dict):
         return cfg
+    cfg["single_reply"] = raw.get("single_reply") is True
     for platform in PLATFORMS:
         block = raw.get(platform)
         if isinstance(block, dict):
@@ -91,6 +92,8 @@ def apply_update(cfg: dict, update: dict) -> dict:
     """A new config from the Setup page's form. Per platform: `enabled`, `allowed_users`, and `token` only
     when a non-empty one was typed (a blank field keeps the saved token; `clear_token` removes it)."""
     out = json.loads(json.dumps(cfg))
+    if isinstance(update, dict) and "single_reply" in update:
+        out["single_reply"] = update["single_reply"] is True
     for platform in PLATFORMS:
         block = update.get(platform) if isinstance(update, dict) else None
         if not isinstance(block, dict):
@@ -117,7 +120,7 @@ def mask_token(token: str) -> str:
 
 def public_view(cfg: dict) -> dict:
     """The config as the Setup page may see it: tokens masked, the allow-lists as typed."""
-    view = {}
+    view = {"single_reply": cfg.get("single_reply") is True}
     for platform in PLATFORMS:
         block = cfg.get(platform) or {}
         view[platform] = {"enabled": bool(block.get("enabled")), "token_present": bool(block.get("token")),
@@ -195,7 +198,8 @@ TERMINAL_EVENTS = ("end", "error")
 
 def replies_from(event: str, data: dict) -> list:
     """Her message(s) carried by one brain event. surface_done carries her quick line, deep_done her real
-    reply (already deduplicated against the quick line by the brain); an error is told as a system line."""
+    reply (already deduplicated against the quick line by the brain). With single_reply enabled, the brain
+    leaves surface_done.reply empty when it selects deep. An error is told as a system line."""
     data = data or {}
     if event == "surface_done":
         text = her_text(data.get("reply"))

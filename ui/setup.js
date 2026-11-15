@@ -799,6 +799,7 @@
     if (status.last_chat && status.last_chat.label) add("ok", "Her last chat", status.last_chat.label + " — where she goes when she speaks first");
   }
   function msgFill(status) {
+    $("msgSingleReply").checked = status.single_reply === true;
     for (const p of Object.keys(MSG)) {
       const cfg = status[p] || {}, cap = p[0].toUpperCase() + p.slice(1);
       $("msg" + cap + "Hint").textContent = cfg.token_present ? "(saved " + (cfg.token_hint || "") + ")" : "";
@@ -827,6 +828,7 @@
     } catch (error) { toast(String(error.message || error), true); }
   }
   $("msgSave").addEventListener("click", () => msgSave({
+    single_reply: $("msgSingleReply").checked,
     discord: { token: $("msgDiscordToken").value.trim(), allowed_users: $("msgDiscordUsers").value, enabled: $("msgDiscordOn").checked },
     telegram: { token: $("msgTelegramToken").value.trim(), allowed_users: $("msgTelegramUsers").value, enabled: $("msgTelegramOn").checked },
   }, "Saved — bots are (re)connecting."));

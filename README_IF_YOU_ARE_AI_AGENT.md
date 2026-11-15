@@ -1308,6 +1308,21 @@ preset in `config/llm_roles.json`, her persona copies) read git's index (`tests/
 `tests/test_shipped_copies.py`), not the working-tree files that onboarding and the Setup page change. A failure
 there is never a reason to touch the person's files.
 
+### Experimental single text reply
+
+Setup → Text her → **Experimental** saves `single_reply` (default false) in `config/messengers.json`.
+The messenger stamps the flag on Discord/Telegram messages; `ws_message` captures it per turn.
+`brain/f_text_reply.py` buffers the parallel deep stream until the surface decides; `f_bridge` carries
+thread-local turn/memory context and a separate cancellation token into that worker, with draining off.
+`f_roles` and native bridge metering defer settlement until the verdict, marking rejected requests
+cancelled even if they finished first. Never cancel the whole turn merely because surface won.
+Ollama in either role selects the sequential path. The stage (voice on or off) and flag-off turns retain
+the original path. Only chosen speech enters history, the memory archive and `_tools_after_turn`.
+`surface_done.raw` remains diagnostic; its empty `reply` suppresses a discarded filler. Long replies
+still split at platform limits. See [docs/MESSENGERS.md](docs/MESSENGERS.md) for logs, receipts and live checks.
+Offline regression coverage: `tests/test_text_single_reply.py` (gated streams, fake timing, cancellation,
+real receipt/ledger and memory archive paths), plus `tests/test_messengers.py` (config, payload and outbox).
+
 ## 11. Changing her safely
 
 - **Persona**: edit the prose in Setup → Personality (or `brain/表层.txt`, `例子.txt`, `思考.txt`, `scenes.json`);

@@ -3118,6 +3118,13 @@ def _describe_provider_error(error):
         return None
 
 
+def _prepare_text_deep(parts, config, cancel):
+    """The bridge replaces this factory to carry its thread-local context into the worker."""
+    def stream():
+        yield from _pick_stream(parts, config)
+    return stream
+
+
 def _ws_run_generation(sid: str, turn_id: str, text: str,
                        model_key: str, deep_model_key: str,
                        entry: dict):
@@ -3132,6 +3139,8 @@ def _ws_run_generation(sid: str, turn_id: str, text: str,
         payload["turn_id"] = turn_id
         socketio.emit(event, payload, to=sid)
 
+    single_reply = bool(entry.get("single_reply"))
+    text_deep = None
     surface_full = ""
     deep_full = ""
     surface_reply_saved = ""
@@ -3152,12 +3161,12 @@ def _ws_run_generation(sid: str, turn_id: str, text: str,
         else:
             # interrupt：保留 partial + protected + interrupted
             partial_sr = surface_reply_saved
-            if not surface_reply_saved and surface_full:
+            if not single_reply and not surface_reply_saved and surface_full:
                 partial_sr = parse_surface_response(surface_full)[0]["speech"]
             mark_turn_interrupted(
                 turn_id,
                 surface_partial=partial_sr,
-                deep_partial=deep_full,
+                deep_partial=deep_full if not single_reply or entry.get("deep_parsed") else "",
             )
             with _hist_lock:
                 t = _find_turn(turn_id)
@@ -3165,18 +3174,20 @@ def _ws_run_generation(sid: str, turn_id: str, text: str,
                     t["protected"] = True
             _save_history()
 
-    def _run_deep(deep_parts: dict, blurt, help_reason: str) -> bool:
+    def _run_deep(deep_parts: dict, blurt, help_reason: str, chunks=None) -> bool:
         """流式跑深层：deep_chunk → deep_done（带 segments）→ 入历史 → 【想想】暂存。
         被取消返回 False（调用方负责 _handle_cancel）。"""
         nonlocal deep_full
         # 工具层（f_tools）不再在深层之前跑任何东西：她先说话，说完之后书记员再交办（_tools_after_turn）。
         # 这里只把 [你手边的工具] 清单插进 prompt，让她知道自己能做什么。
-        round_context = entry.get("context", "")
-        # xAI 缓存按 server 分片，conv_id 让同一会话落到同一 server
-        deep_parts = _with_round_context(deep_parts, round_context)
-        deep_parts = _with_capabilities(deep_parts)
-        deep_parts["conv_id"] = sid
-        for chunk in _pick_stream(deep_parts, deep_model_config):
+        if chunks is None:
+            round_context = entry.get("context", "")
+            # xAI 缓存按 server 分片，conv_id 让同一会话落到同一 server
+            deep_parts = _with_round_context(deep_parts, round_context)
+            deep_parts = _with_capabilities(deep_parts)
+            deep_parts["conv_id"] = sid
+            chunks = _pick_stream(deep_parts, deep_model_config)
+        for chunk in chunks:
             if cancel.is_set():
                 return False
             deep_full += chunk
@@ -3237,29 +3248,63 @@ def _ws_run_generation(sid: str, turn_id: str, text: str,
             _tools_after_turn(turn_id, "", None, entry.get("deep_parsed"), proactive_cue, reply_lang, entry)
             return
 
+        if single_reply:
+            from f_text_reply import TextReply
+            # Build before the surface can write anything into history: no spoken blurt.
+            deep_parts = build_messages(text, blurted_reply=None, reply_lang=reply_lang,
+                                        reply_lang_reason=reply_lang_reason)
+            sequential = any(c.get("provider") == "ollama" for c in (model_config, deep_model_config))
+            if not sequential:
+                prepared = _with_capabilities(_with_round_context(deep_parts, entry.get("context", "")))
+                prepared["conv_id"] = sid
+                text_deep = TextReply(_prepare_text_deep, prepared, deep_model_config, cancel)
+            print(f"[Hane] text single reply {turn_id}: {'sequential' if sequential else 'parallel'}")
+
         # ── 表层 ──
-        parts = build_surface_messages(text, lang_text=lang_text)
-        parts = _with_round_context(parts, entry.get("context", ""))
-        parts = _with_capabilities(parts)
-        parts["conv_id"] = sid   # xAI 缓存：surface 也 pin 到同一 server 命中前缀缓存（非 xai provider 忽略）
-        # 表层和深层一样走 _pick_stream：f_roles 把 OpenRouter / Ollama / Alibaba 的角色模型交给各自的 transport。
-        # A surface on Ollama must not call _stream_openai directly: f_bridge's metered stream takes only anthropic /
-        # xai, so every Fully Local turn failed before any model call ("Build F supports its configured …").
-        _surface_stream = _pick_stream(parts, model_config)
-        for chunk in _surface_stream:
+        try:
+            parts = build_surface_messages(text, lang_text=lang_text)
+            parts = _with_round_context(parts, entry.get("context", ""))
+            parts = _with_capabilities(parts)
+            parts["conv_id"] = sid   # xAI 缓存：surface 也 pin 到同一 server 命中前缀缓存（非 xai provider 忽略）
+            # 表层和深层一样走 _pick_stream：f_roles 把 OpenRouter / Ollama / Alibaba 的角色模型交给各自的 transport。
+            # A surface on Ollama must not call _stream_openai directly: f_bridge's metered stream takes only anthropic /
+            # xai, so every Fully Local turn failed before any model call ("Build F supports its configured …").
+            _surface_stream = _pick_stream(parts, model_config)
+            for chunk in _surface_stream:
+                if cancel.is_set():
+                    _handle_cancel()
+                    return
+                surface_full += chunk
+                if not single_reply:
+                    _emit("surface_chunk", {"text": chunk})
+
             if cancel.is_set():
                 _handle_cancel()
                 return
-            surface_full += chunk
-            _emit("surface_chunk", {"text": chunk})
 
+            sf = _extract_surface_fields(surface_full)
+            if single_reply:
+                # The legacy parser deliberately accepts free prose. A judge needs an
+                # explicit verdict and reply field; malformed output falls back to deep.
+                mode = re.search(r"(?im)^\s*mode\s*[:：]\s*(say\+think|think|say)\s*$", surface_full)
+                if not mode or not re.search(r"(?im)^\s*reply\s*[:：]", surface_full):
+                    raise ValueError("surface verdict is unparseable")
+        except Exception as error:
+            if not single_reply:
+                raise
+            print(f"[Hane] text single reply {turn_id}: surface failed ({type(error).__name__}); using deep")
+            sf = {"mode": "think", "reply": "", "tone": "casual_neutral", "status": "ok"}
         if cancel.is_set():
             _handle_cancel()
             return
-
-        sf = _extract_surface_fields(surface_full)
         surface_mode = sf["mode"]
-        surface_reply_saved = sf["reply"]
+        surface_reply_saved = sf["reply"] if not single_reply or surface_mode == "say" else ""
+        if single_reply:
+            use_deep = surface_mode in ("say+think", "think")
+            if text_deep is not None:
+                text_deep.choose(use_deep)
+            print(f"[Hane] text single reply {turn_id}: mode={surface_mode}; "
+                  f"{'deep selected' if use_deep else 'surface selected; deep cancelled' if text_deep else 'surface selected; deep skipped'}")
         with _hist_lock:
             current = _find_turn(turn_id)
             if current is not None:
@@ -3287,9 +3332,11 @@ def _ws_run_generation(sid: str, turn_id: str, text: str,
                 _handle_cancel()
                 return
             blurt = surface_reply_saved or None
-            deep_parts = build_messages(text, blurted_reply=blurt, reply_lang=reply_lang,
-                                        reply_lang_reason=reply_lang_reason)
-            if not _run_deep(deep_parts, blurt, "深层【想想】"):
+            if not single_reply:
+                deep_parts = build_messages(text, blurted_reply=blurt, reply_lang=reply_lang,
+                                            reply_lang_reason=reply_lang_reason)
+            chunks = text_deep.chunks() if text_deep is not None else None
+            if not _run_deep(deep_parts, blurt, "深层【想想】", chunks=chunks):
                 _handle_cancel()
                 return
 
@@ -3311,6 +3358,8 @@ def _ws_run_generation(sid: str, turn_id: str, text: str,
             discard_turn(turn_id)
             _emit("end")
     finally:
+        if text_deep is not None and not text_deep.cancel.verdict.is_set():
+            text_deep.choose(False)
         with _ws_active_lock:
             _ws_active.pop(turn_id, None)
         if not entry.get("_spoke"):
@@ -3388,7 +3437,8 @@ def _await_commit(entry: dict, cancel, poll: float = 0.05) -> bool:
 
 def _start_message_gen(sid: str, text: str, my_partial: str,
                        model_key: str, deep_model_key: str,
-                       turn_id: str | None = None, context: str = "", speculative: bool = False):
+                       turn_id: str | None = None, context: str = "", speculative: bool = False,
+                       single_reply: bool = False):
     """处理 my_partial（如有）→ 清未保护 turn → 新建 User turn → 开生成。
 
     turn_id 若由客户端提供则复用作为内部 id；未提供时后端生成一个 UUID。
@@ -3413,7 +3463,7 @@ def _start_message_gen(sid: str, text: str, my_partial: str,
             turn["context_inject"] = context
     _save_history()
     entry = {"cancel": threading.Event(), "reason": None, "sid": sid, "context": context,
-             "speculative": bool(speculative), "committed": threading.Event()}
+             "speculative": bool(speculative), "committed": threading.Event(), "single_reply": single_reply}
     if not speculative:
         entry["committed"].set()
     with _ws_active_lock:
@@ -3598,6 +3648,7 @@ def ws_message(data):
         DEFAULT_SURFACE_MODEL, DEFAULT_DEEP_MODEL,
         turn_id=turn_id, context=str(data.get("context") or ""),
         speculative=bool(data.get("speculative")),
+        single_reply=data.get("single_reply") is True and _CURRENT_CHANNEL in ("discord", "telegram"),
     )
 
 

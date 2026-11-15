@@ -1142,7 +1142,7 @@ async def preflight_report():
 
 
 MESSENGERS_URL = os.getenv("AMIKA_MESSENGERS_URL", "http://127.0.0.1:5215")
-_MESSENGER_FIELDS = ("ok", "discord", "telegram", "last_chat", "live", "brain", "light", "discord_library", "config_path")
+_MESSENGER_FIELDS = ("ok", "single_reply", "discord", "telegram", "last_chat", "live", "brain", "light", "discord_library", "config_path")
 
 
 @app.get("/api/build_f/messengers")
