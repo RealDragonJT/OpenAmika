@@ -319,7 +319,8 @@ def test_status_payload_lists_jobs_and_kinds(wired):
     assert payload["servers"]["hermes"]["kind"] == "agent" and payload["servers"]["iot"]["kind"] == "mcp"
     assert payload["servers"]["hermes"]["persona_note"].startswith("你电脑上的小帮手")
     assert payload["jobs"][0]["step"] == "opening browser"
-    assert payload["config"] is wired["cfg"]           # the raw document, env/cwd included, for the page's editor
+    assert payload["config"] == wired["cfg"]          # editable copy; saved HTTP secrets are redacted
+    assert payload["config"] is not wired["cfg"]
 
 
 # ───────────────────────────── health ─────────────────────────────
@@ -869,3 +870,233 @@ def test_agent_usage_is_priced_from_openrouters_public_list_when_nothing_local_m
     assert abs(meter.begun[0][4] - (250_000 * 1.0 + 1_000 * 3.2) / 1e6) < 1e-9   # list price, per million
     assert meter.pricing["models"]["openrouter:z-ai/glm-5"] == {"input": 1.0, "output": 3.2, "cache_read": 0.2}
     f_tools._OR_PRICES.update(at=0.0, models={})
+
+
+# ───────────────────────────── tool schemas in the clerk prompt ─────────────────────────────
+
+PROSE = "This field is explained at length for people reading the server's documentation. " * 3
+
+
+def _long_schema():
+    """A tool schema whose prose pushes its last required parameter and nested item shapes past 1,500 characters."""
+    def item(kind, extra):
+        return {"type": "object", "additionalProperties": False, "required": ["type", *extra],
+                "properties": {"type": {"type": "string", "const": kind},
+                               **{k: {"type": "string", "maxLength": 200, "description": PROSE} for k in extra}}}
+    return {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": False,
+            "required": ["request", "request_key"],
+            "properties": {
+                "request": {"type": "object", "description": PROSE, "required": ["version", "items"],
+                            "properties": {"version": {"type": "number", "const": 1},
+                                           "items": {"type": "array", "minItems": 1, "maxItems": 12, "description": PROSE,
+                                                     "items": {"oneOf": [item("seat", ["name"]), item("note", ["text"])]}}}},
+                "request_key": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,128}$"}}}
+
+
+HOLD_TOOL = {"name": "hold_slot", "schema": _long_schema(),
+             "description": "Hold a slot and return its hold ID, valid for 15 minutes. " + PROSE * 4
+                            + "Reuse request_key for retries."}
+
+
+def test_clerk_schema_keeps_required_fields_and_item_shapes_of_a_long_schema():
+    full = json.dumps(HOLD_TOOL["schema"], ensure_ascii=False, separators=(",", ":"))
+    # what a plain cut lost: the parameter's own definition and the item shapes sit far past 500 characters
+    assert len(full) > f_tools.CLERK_SCHEMA_BUDGET and full.index('"request_key":{') > 1500 and full.index('"const":"seat"') > 500
+    text = f_tools.clerk_schema(HOLD_TOOL["schema"])
+    assert len(text) <= f_tools.CLERK_SCHEMA_BUDGET and not text.endswith("…")
+    seen = json.loads(text)
+    assert seen["required"] == ["request", "request_key"]
+    assert seen["properties"]["request_key"] == {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,128}$"}
+    items = seen["properties"]["request"]["properties"]["items"]
+    assert [i["properties"]["type"]["const"] for i in items["items"]["oneOf"]] == ["seat", "note"]
+    assert [i["required"] for i in items["items"]["oneOf"]] == [["type", "name"], ["type", "text"]]
+    assert seen["properties"]["request"]["required"] == ["version", "items"]
+    assert "$schema" not in seen
+
+
+def test_clerk_schema_leaves_short_schemas_whole_and_never_drops_parameters_named_like_keywords():
+    small = {"type": "object", "properties": {"device": {"type": "string", "description": "Device name"}}}
+    assert json.loads(f_tools.clerk_schema(small)) == small
+    named = {"type": "object", "required": ["title", "description"], "properties": {
+        "title": {"type": "string", "description": "x" * 3000},
+        "description": {"type": "string"}, "examples": {"type": "array"}}}
+    seen = json.loads(f_tools.clerk_schema(named))
+    assert set(seen["properties"]) == {"title", "description", "examples"}
+    assert seen["required"] == ["title", "description"]
+    assert f_tools.clerk_schema(None) == "{}"
+
+
+def test_clerk_prompt_shows_a_long_tool_whole(wired):
+    wired["cfg"]["mcpServers"]["booking"] = {"enabled": True, "url": "https://mcp.example.test/mcp",
+                                             "tools": {"hold_slot": "auto"}}
+    wired["hub"].tools["booking"] = [dict(HOLD_TOOL)]
+    wired["hub"].status["booking"] = {"connected": True}
+    f_tools.run_clerk("t-hold", "Can you hold a table for me?", "Sure, holding one now.", "")
+    prompt = wired["role_replies"][0]["messages"][0]["content"]
+    line = next(l for l in prompt.splitlines() if l.strip().startswith("参数 JSON Schema:") and "request_key" in l)
+    schema = json.loads(line.split("参数 JSON Schema:", 1)[1])
+    assert "request_key" in schema["required"]
+    assert "Reuse request_key for retries" in prompt     # the tool description is not cut mid-way either
+
+
+# ───────────────────────────── multi-step tools: one call needs another's result ─────────────────────────────
+
+CONFIRM_TOOL = {"name": "confirm_hold", "description": "Confirm a held slot.",
+                "schema": {"type": "object", "required": ["hold_id"], "properties": {"hold_id": {"type": "string"}}}}
+HOLD_ID = "hold-0001"
+
+
+@pytest.fixture
+def booking(wired, monkeypatch):
+    monkeypatch.setattr(f_tools, "_typing_ms", lambda line: 0)     # her typing animation is not under test here
+    wired["cfg"]["mcpServers"]["booking"] = {"enabled": True, "url": "https://mcp.example.test/mcp",
+                                             "tools": {"hold_slot": "auto", "confirm_hold": "auto"}}
+    wired["hub"].tools["booking"] = [dict(HOLD_TOOL), dict(CONFIRM_TOOL)]
+    wired["hub"].status["booking"] = {"connected": True}
+    wired["hub"].replies[("booking", "hold_slot")] = {"state": "held", "hold_id": HOLD_ID}
+    wired["hub"].replies[("booking", "confirm_hold")] = lambda a: (
+        {"state": "confirmed"} if a.get("hold_id") == HOLD_ID else {"code": "not_found"})
+    script = []
+
+    def role_complete(role, messages, *, phase=None, turn_id=""):
+        wired["role_replies"].append({"role": role, "phase": phase, "messages": messages})
+        return {"text": json.dumps(script.pop(0) if script else {"calls": [], "answers": [], "note": "done"})}
+
+    wired["g"]["F_ROLE_COMPLETE"] = role_complete
+    wired["script"] = script
+    return wired
+
+
+ASK = "Hold a table for two tonight and confirm it"
+HOLD_CALL = {"tool": "booking__hold_slot", "quote": "Hold a table for two tonight",
+             "arguments": {"request": {"version": 1, "items": [{"type": "seat", "name": "Sam"}]}, "request_key": "hold1"}}
+
+
+def _confirm(hold_id, quote="confirm it"):
+    return {"tool": "booking__confirm_hold", "quote": quote, "arguments": {"hold_id": hold_id}}
+
+
+def _booking_calls(hub):
+    return [(tool, args) for server, tool, args in hub.calls if server == "booking"]
+
+
+def test_a_placeholder_id_is_never_sent_and_the_follow_up_uses_the_real_id(booking):
+    # both calls in one reply, the second with a stand-in for the ID that only the first call returns
+    booking["script"] += [
+        {"calls": [HOLD_CALL, _confirm("placeholder_id_from_hold_slot")], "note": "hold and confirm"},
+        {"calls": [_confirm(HOLD_ID)], "note": "confirm"},
+    ]
+    outcome = f_tools.run_clerk("t-mp", ASK, "On it, holding and confirming.", "")
+    assert [(t, a.get("hold_id")) for t, a in _booking_calls(booking["hub"])] == [("hold_slot", None),
+                                                                                 ("confirm_hold", HOLD_ID)]
+    assert outcome["deferred"] == 1 and outcome["calls"] == 2 and outcome["steps"] == 3
+    follow_up = booking["role_replies"][1]["messages"]
+    assert "后续步骤" in follow_up[0]["content"] and HOLD_ID in follow_up[1]["content"]
+    assert any("not sent: placeholder hold_id" in str(e.get("result")) for e in f_tools._LOG)
+    # a third step ran and found nothing left to do: the loop stops on its own
+    assert len(booking["role_replies"]) == 3
+
+
+def test_a_follow_up_never_repeats_a_call_already_made(booking):
+    booking["script"] += [{"calls": [HOLD_CALL], "note": "hold"}, {"calls": [HOLD_CALL], "note": "same again"}]
+    f_tools.run_clerk("t-dup", ASK, "Sure.", "")
+    assert [t for t, _ in _booking_calls(booking["hub"])] == ["hold_slot"]
+    assert len(booking["role_replies"]) == 2
+
+
+def test_follow_up_steps_are_capped(booking):
+    for n in range(10):      # a clerk that keeps finding "one more step" (each a different call)
+        call = json.loads(json.dumps(HOLD_CALL))
+        call["arguments"]["request_key"] = f"hold{n}"
+        booking["script"].append({"calls": [call], "note": "again"})
+    f_tools.run_clerk("t-cap", ASK, "Sure.", "")
+    assert len(booking["role_replies"]) == 1 + f_tools.CLERK_FOLLOW_UPS
+    assert len(_booking_calls(booking["hub"])) == 1 + f_tools.CLERK_FOLLOW_UPS
+
+
+def test_no_follow_up_without_a_tool_result(booking):
+    f_tools.run_clerk("t-none", "How was your day?", "Fine.", "")
+    assert len(booking["role_replies"]) == 1
+    booking["hub"].call = lambda *a, **k: ('{"code":"not_allowed"}', True)      # a failed call
+    booking["script"].append({"calls": [HOLD_CALL], "note": "hold"})
+    f_tools.run_clerk("t-fail", ASK, "Sure.", "")
+    assert len(booking["role_replies"]) == 2           # failure: nothing for a follow-up to build on
+
+
+def test_placeholder_detection_only_looks_at_id_arguments():
+    for value in ("(previous_hold_id_from_context)", "placeholder_id_from_hold_slot", "<hold_id>", "{{hold_id}}",
+                  "HOLD_ID_FROM_PREVIOUS_STEP"):
+        assert f_tools._placeholder_argument({"hold_id": value}), value
+    assert f_tools._placeholder_argument({"hold_id": HOLD_ID}) is None
+    assert f_tools._placeholder_argument({"jobId": "job-1", "ids": "1,2"}) is None
+    assert f_tools._placeholder_argument({"request": {"items": [{"text": "(see you soon)"}]}}) is None
+    assert f_tools._placeholder_argument({"items": [{"device_id": "<device>"}]}) == ("device_id", "<device>")
+
+
+def test_an_id_stays_visible_to_the_clerk_longer_than_a_device_state(booking, monkeypatch):
+    now = 1_000_000.0
+    monkeypatch.setattr(f_tools.time, "time", lambda: now)
+    f_tools._LOG.append({"ts": now - 600, "turn_id": "old", "server": "booking", "tool": "hold_slot", "arguments": {},
+                         "ok": True, "policy": "auto", "result": "x" * 300 + f' "hold_id":"{HOLD_ID}"'})
+    f_tools._LOG.append({"ts": now - 600, "turn_id": "old", "server": "iot", "tool": "get_state", "arguments": {},
+                         "ok": True, "policy": "auto", "result": "lamp is on"})
+    f_tools.run_clerk("t-later", "confirm it", "Confirming.", "")
+    seen = booking["role_replies"][0]["messages"][1]["content"]
+    assert HOLD_ID in seen                  # 10 minutes old, past 300 characters: still there
+    assert "lamp is on" not in seen         # a device state that old is not
+
+
+def test_server_instructions_reach_the_clerk(booking):
+    booking["hub"].server_instructions = lambda name: (
+        "Hold a slot first, then call confirm_hold only when the user asks to confirm." if name == "booking" else "")
+    f_tools.run_clerk("t-ins", "How was your day?", "Fine.", "")
+    prompt = booking["role_replies"][0]["messages"][0]["content"]
+    assert prompt.count("call confirm_hold only when the user asks to confirm") == 1
+    assert "不代表Sam的要求" in prompt
+
+
+def test_a_follow_up_quoting_her_words_is_refused_and_she_is_told_it_did_not_run(booking):
+    # the follow-up has the real ID but quotes her line instead of his: the consent check refuses it
+    said = "Okay, holding one now. Okay, it's done."
+    booking["script"] += [
+        {"calls": [dict(HOLD_CALL, quote="Just want to make sure it works.")], "note": "hold"},
+        {"calls": [_confirm(HOLD_ID, quote=said)], "note": "confirm"},
+    ]
+    outcome = f_tools.run_clerk("t-q", "Book anything tonight and confirm it. Just want to make sure it works.", said, "")
+    assert [t for t, _ in _booking_calls(booking["hub"])] == ["hold_slot"]
+    assert outcome["refused"] == 1
+    follow_up = booking["role_replies"][1]["messages"]
+    assert "绝不能抄【她这轮说出口的话】" in follow_up[0]["content"]
+    assert 'Sam的原话："Just want to make sure it works."' in follow_up[1]["content"]
+    notes = [note for _, note, _ in booking["relays"]]
+    assert any("confirm_hold" in n and "没有执行" in n and "别说已经办好了" in n for n in notes)
+
+
+def test_a_follow_up_quoting_his_request_runs(booking):
+    booking["script"] += [
+        {"calls": [dict(HOLD_CALL, quote="Just want to make sure it works.")], "note": "hold"},
+        {"calls": [_confirm(HOLD_ID, quote="confirm it")], "note": "confirm"},
+    ]
+    outcome = f_tools.run_clerk("t-q2", "Book anything tonight and confirm it. Just want to make sure it works.",
+                                "On it.", "")
+    assert [(t, a.get("hold_id")) for t, a in _booking_calls(booking["hub"])] == [("hold_slot", None),
+                                                                                 ("confirm_hold", HOLD_ID)]
+    assert outcome["refused"] == 0
+
+
+def test_the_call_budget_covers_the_whole_turn(booking):
+    booking["cfg"]["limits"] = {"max_calls_per_turn": 1}
+    booking["script"] += [{"calls": [HOLD_CALL], "note": "hold"}, {"calls": [_confirm(HOLD_ID)], "note": "confirm"}]
+    outcome = f_tools.run_clerk("t-budget", ASK, "Sure.", "")
+    assert [t for t, _ in _booking_calls(booking["hub"])] == ["hold_slot"]
+    assert outcome["calls"] == 1 and len(booking["role_replies"]) == 1     # no follow-up once the budget is spent
+
+
+def test_a_follow_up_never_repeats_an_agent_task(booking):
+    ask = {"tool": "hermes__ask", "quote": "Hold a table for two tonight", "arguments": {"task": "find a restaurant"}}
+    booking["script"] += [{"calls": [HOLD_CALL, ask], "note": "hold and ask"},
+                          {"calls": [ask, _confirm(HOLD_ID)], "note": "ask again and confirm"}]
+    f_tools.run_clerk("t-agent", ASK, "Sure.", "")
+    asks = [c for c in booking["hub"].calls if c[:2] == ("hermes", "ask")]
+    assert len(asks) == 1
+    assert [t for t, _ in _booking_calls(booking["hub"])] == ["hold_slot", "confirm_hold"]

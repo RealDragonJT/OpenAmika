@@ -41,6 +41,8 @@ from tts_text import voice_text
 import voice_adapter
 from avatar_cache import asset_response, model_response, versioned_reference
 import pet_window
+from mcp_access_log import install as install_oauth_access_filter
+install_oauth_access_filter("uvicorn.access")
 
 from silero_vad import load_silero_vad
 
@@ -865,7 +867,7 @@ async def build_f_select_models(request: Request):
 # tools.json, env/cwd included, so a save from the page never strips what the cards do not show) and
 # "iot_disclaimer" (the IoT safety statement's version and acceptance)
 _TOOLS_FIELDS = ("ok", "enabled", "clerk_role", "limits", "servers", "pending", "jobs", "relay_queue", "log", "config", "dialogue",
-                 "iot_disclaimer")
+                 "iot_disclaimer", "results", "warning")
 
 
 # ── IoT safety statement: IoT turns on only after docs/IOT_DISCLAIMER.md was read and accepted on the Tools page ──
@@ -922,7 +924,12 @@ def _iot_accept_gate(payload):
 
 
 @app.get("/api/build_f/tools")
-async def build_f_tools_status():
+async def build_f_tools_status(request: Request = None):
+    if request is not None:
+        expected_origin = f"{request.url.scheme}://{request.url.netloc}"
+        if (request.headers.get("origin") not in (None, expected_origin)
+                or request.headers.get("sec-fetch-site") == "cross-site"):
+            raise HTTPException(status_code=403, detail="Use the OpenAmika page.")
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as client:
             async with client.get(HANE_URL.rstrip("/") + "/api/build_f/tools", allow_redirects=False) as response:
@@ -950,6 +957,61 @@ async def build_f_tools_config(request: Request):
 async def build_f_tools_test(request: Request):
     return await _build_f_control(request, "/api/build_f/tools/test", "tools-test", ("ok", "server", "kind", "tools", "health"),
                                   precheck=_iot_server_gate)
+
+
+@app.post("/api/build_f/tools/connect")
+async def build_f_tools_connect(request: Request):
+    return await _build_f_control(request, "/api/build_f/tools/connect", "tools-connect", _TOOLS_FIELDS,
+                                  precheck=_iot_server_gate)
+
+
+@app.post("/api/build_f/tools/disconnect")
+async def build_f_tools_disconnect(request: Request):
+    return await _build_f_control(request, "/api/build_f/tools/disconnect", "tools-disconnect", _TOOLS_FIELDS)
+
+
+@app.get("/api/build_f/tools/oauth/callback")
+async def build_f_tools_oauth_callback(request: Request):
+    # OAuth redirects cannot carry the page's action header. The brain validates the
+    # single-use random state and the SDK validates issuer and PKCE before token exchange.
+    params = {key: request.query_params.get(key, "") for key in ("code", "state", "iss", "error")}
+    accepted = False
+    if params["state"] and all(len(value) <= 4096 for value in params.values()):
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as client:
+                async with client.post(HANE_URL.rstrip("/") + "/api/build_f/tools/oauth/callback", json=params,
+                                       headers={"X-Build-F-Action": "tools-oauth-callback"}, allow_redirects=False) as response:
+                    accepted = response.status == 200
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            pass  # Render the same token-free recovery page when the brain is offline.
+    message = "Authorization response received. Return to Tools to check the connection." if accepted else "This sign-in expired or is invalid. Return to Tools and connect again."
+    return HTMLResponse("<!doctype html><meta charset=utf-8><title>OpenAmika sign-in</title><p>" + message +
+                        '</p><a href="/tools">Return to Tools</a>', status_code=200 if accepted else 400,
+                        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+                                 "Content-Security-Policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'"})
+
+
+@app.get("/api/build_f/tools/attachments/{key}")
+async def build_f_tools_attachment(key: str):
+    import re
+    from fastapi.responses import Response
+    if not re.fullmatch(r"[a-f0-9]{32}", key):
+        raise HTTPException(status_code=404, detail="Attachment unavailable.")
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as client:
+        async with client.get(HANE_URL.rstrip("/") + "/api/build_f/tools/attachments/" + key,
+                              allow_redirects=False) as response:
+            if response.status != 200:
+                raise HTTPException(status_code=404, detail="Attachment expired or unavailable.")
+            content = bytearray()
+            async for chunk in response.content.iter_chunked(65536):
+                content.extend(chunk)
+                if len(content) > 5 * 1024 * 1024:
+                    raise HTTPException(status_code=413, detail="Attachment exceeds size limit.")
+            mime = response.headers.get("Content-Type", "").split(";")[0]
+            if mime not in ("image/png", "image/jpeg", "image/webp", "image/gif"):
+                raise HTTPException(status_code=415, detail="Unsupported attachment.")
+            return Response(bytes(content), media_type=mime,
+                            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.post("/api/build_f/tools/approve")

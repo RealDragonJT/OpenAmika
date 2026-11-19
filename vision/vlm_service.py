@@ -63,6 +63,7 @@ class SmallVLM:
         self._processor = None
         self._cached_prompt: Optional[str] = None
         self._cached_text: Optional[str] = None
+        self.inference_lock = threading.RLock()
 
     @staticmethod
     def _cached_snapshot(repo: str) -> bool:
@@ -137,9 +138,10 @@ class SmallVLM:
         return self._cached_text
 
     def preprocess(self, image, prompt: str) -> Any:
-        return self._processor(
-            text=[self._template(prompt)], images=[image], return_tensors="pt"
-        )
+        with self.inference_lock:
+            return self._processor(
+                text=[self._template(prompt)], images=[image], return_tensors="pt"
+            )
 
     def generate(self, inputs: Any) -> str:
         import torch
@@ -338,7 +340,9 @@ class InferenceLoop:
             except queue.Empty:
                 continue
             try:
-                self._state.push(self._model.generate(inputs))
+                with self._model.inference_lock:
+                    description = self._model.generate(inputs)
+                self._state.push(description)
             except Exception as exc:
                 print(f"[vlm] generate failed: {exc}", flush=True)
             if self.max_dps > 0:
@@ -416,6 +420,8 @@ def main():
                   args.max_dps, args.change_threshold).start()
 
     app = FastAPI(title="OpenAmika Vision")
+    from image_analysis import install_image_analysis
+    install_image_analysis(app, model)
 
     @app.get("/api/latest")
     def api_latest():

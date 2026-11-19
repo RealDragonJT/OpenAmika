@@ -62,6 +62,7 @@
     },
     "home-assistant": {
       "url": "http://homeassistant.local:8123/mcp_server/sse",
+      "transport": "sse",
       "headers": { "Authorization": "Bearer PASTE-A-LONG-LIVED-HA-TOKEN" },
       "enabled": false
     }

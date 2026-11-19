@@ -79,7 +79,7 @@
     <div class="form-row">
       <div class="field" style="max-width:160px;"><label>Name</label><input type="text" id="addName" placeholder="hermes" maxlength="32"></div>
       <div class="field" style="max-width:150px;"><label>Transport</label>
-        <select id="addTransport"><option value="stdio">stdio (local)</option><option value="http">http (remote)</option></select></div>
+        <select id="addTransport"><option value="stdio">stdio (local)</option><option value="http">HTTP (remote)</option><option value="sse">SSE (legacy)</option></select></div>
       <div class="field" style="flex:2;"><label id="addTargetLabel">Command + args (first word = command)</label>
         <input type="text" id="addTarget" class="mono" placeholder="python -m openamika_agents hermes"></div>
       <button class="btn small" id="addBtn">Add</button>
@@ -98,7 +98,7 @@
         <textarea id="rawConfig" class="mono" rows="14" spellcheck="false"></textarea>
         <div style="display:flex; gap:12px; margin-top:10px;">
           <button class="btn small" id="rawSave">Save raw config</button>
-          <span class="card-hint">Full document — env vars, headers, cwd live here.</span>
+          <span class="card-hint">Saved header placeholders preserve credentials. Replace a placeholder to change its value.</span>
         </div>
       </div>
     </details>
@@ -112,6 +112,7 @@
       </tr></thead><tbody id="logBody"><tr><td colspan="5" class="card-hint">No tool calls yet.</td></tr></tbody></table>
     </div>
   </section>
+  <section class="tech-card" id="toolResults" hidden aria-label="Tool attachments"></section>
 </main>
 
 <!-- The IoT safety statement (text: docs/IOT_DISCLAIMER.md via /api/build_f/iot/disclaimer). Shown before IoT can be

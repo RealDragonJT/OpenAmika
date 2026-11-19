@@ -23,10 +23,10 @@ from .disclaimer import IOT_DISCLAIMER_VERSION, refusal
 def _fastmcp():
     """The MCP server class, imported only after the safety check (a refusal needs no packages)."""
     try:
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer as FastMCP
     except ImportError:  # newer SDK naming
         try:
-            from mcp import MCPServer as FastMCP  # type: ignore
+            from mcp.server.fastmcp import FastMCP
         except ImportError:
             print("The 'mcp' package is required: pip install mcp", file=sys.stderr)
             raise SystemExit(1)
@@ -151,10 +151,7 @@ def main():
     BRIDGE.start()
     mcp = build_server(args.host, args.port)
     if args.http:
-        try:
-            mcp.run(transport="streamable-http")
-        except (TypeError, ValueError):
-            mcp.run(transport="sse")
+        mcp.run(transport="streamable-http", host=args.host, port=args.port)
     else:
         mcp.run()
 

@@ -474,8 +474,75 @@ on your PC, and the Tools page's raw editor shows them: anyone who can open her 
 
 ## Requirements
 
-`pip install "mcp>=1.2,<2"` in the **brain** environment (in `brain/requirements.txt`; `scripts/setup_core.py`
+`pip install -r brain/requirements.txt` in the **brain** environment (MCP SDK **2.3.0**; `scripts/setup_core.py`
 installs it). The agents bridge needs nothing more: the brain runs it from `servers/openamika-agents` with its
 own interpreter, and `httpx` comes with `mcp` (`pip install -e servers/openamika-agents` is only for running it
 elsewhere). Hermes Agent or nanoMuse themselves are installed as above; `pip install -e servers/openamika-iot`
 for the smart home.
+
+### Remote MCP authorization and protocol versions
+
+The client uses SDK v2's automatic protocol negotiation: modern `2026-07-28` servers
+and legacy servers are supported. A server's protocol version is distinct from the
+Python SDK version. The Tools card displays the negotiated version after connecting.
+The bundled agent and IoT bridges use the same SDK version as the brain.
+
+Add an HTTP server by its MCP endpoint URL. **Connect** discovers its tools or offers
+**Continue to sign in** with the discovered issuer and requested scopes. The external
+sign-in link opens a new tab. Return to Tools after authorization. Login does not approve
+individual tool actions; `auto` / `confirm` / `deny` still apply. **Disconnect account**
+disables the server, cancels a pending login, removes local OAuth credentials, and attempts
+provider revocation if available. A revocation failure is reported separately.
+
+Remote configuration supports these fields (leave OAuth details absent for automatic discovery):
+
+```json
+{
+  "url": "https://example.com/mcp",
+  "transport": "http",
+  "enabled": false,
+  "auth": {
+    "mode": "auto"
+  }
+}
+```
+
+Use `transport: "sse"` explicitly for old HTTP+SSE endpoints; the client does not guess
+from installed imports or URL spelling. Authentication modes are `auto`, `oauth`, `none`,
+and `static`. Existing `headers` entries continue to work. Saved header values appear as
+`__OPENAMIKA_KEEP_SECRET__` in the editor; that placeholder keeps the saved value when
+editing other settings. Re-enter a header credential when changing its server URL.
+
+For public pre-registered clients, set `auth.client_id` and `auth.issuer`. Alternatively
+set `auth.client_metadata_url` to an existing HTTPS Client ID Metadata Document. Otherwise
+the SDK uses dynamic registration when supported. `auth.scope` can specify requested scopes.
+The default callback is the local speech gateway's `/api/build_f/tools/oauth/callback`.
+For a browser on another device, explicitly set `auth.redirect_uri` to that route on your
+configured HTTPS gateway origin, and register that exact redirect URI with the provider.
+Discovered OAuth endpoints must use public HTTPS; deliberately private authorization servers
+can be allowed with `auth.allowed_origins` (an array of exact HTTP(S) origins).
+
+OAuth tokens, expiry, and client registration are stored separately in
+`config/.mcp-credentials/`, encrypted for the Windows user with DPAPI. On macOS/Linux the
+OS keychain/Secret Service must be available; there is no plaintext fallback. Existing
+manually configured header/environment secrets retain their existing storage location.
+OAuth callbacks are single-use and access logs redact their query parameters.
+
+### Tool results and images
+
+Tool discovery follows pagination. Results retain structured content and MCP error status.
+Calls are not automatically replayed after a timeout or a lost response: the result may
+be unknown, particularly for a write. Check the server's status before requesting another
+action. Pending approvals are invalidated by a changed server connection or denied policy.
+
+Image results are validated and kept in the ignored `config/.mcp-results/` cache for up to
+one hour (5 MiB per image, 16 million pixels, 30 MiB total). The Tools page offers image
+previews and original attachments. Remote resource references are retained as metadata;
+the client does not automatically fetch arbitrary linked content.
+
+When `AMIKA_VLM_URL` points to the configured local vision service, the first image in a
+result is analyzed through its new `/api/analyze` interface. Analysis uses the loaded model
+and tool context without changing the camera's latest description. Set top-level
+`image_analysis: "off"` in `tools.json` to disable it; the default is `"local"`. If vision is
+unavailable, busy, or fails, the image remains viewable and Amika is told it was not visually
+inspected. This implementation does not send images to cloud providers or download a model.

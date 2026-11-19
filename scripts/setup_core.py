@@ -102,7 +102,7 @@ PYTHON_NEEDED = ("OpenAmika needs Python 3.11 (3.12 works too): install 3.11 fro
 ENV_SPECS = {
     "brain": ("brain", "brain/requirements.txt", (),
               ["flask", "flask_cors", "flask_socketio", "socketio", "requests", "dotenv", "numpy", "mcp", "google.genai",
-               "tzdata"]),
+               "tzdata", "keyring", "PIL", "mcp.server.mcpserver"]),
     "speech": ("speech", "speech/requirements.txt", ("torch", "torchaudio"),
                ["torch", "torchaudio", "soundfile", "numpy", "fastapi", "uvicorn", "funasr", "modelscope", "silero_vad",
                 "socketio", "aiohttp", "multipart"]),

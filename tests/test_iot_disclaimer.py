@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -192,7 +193,8 @@ class GatedFakeHub(f_tools._Hub):
 
     async def _connect_async(self, name, cfg):
         self.spawned.append((name, f_tools._server_env(name, cfg).get(iot_disclaimer.ENV_VAR)))
-        self._sessions[name] = (None, None)
+        from mcp_runtime import fingerprint
+        self._sessions[name] = SimpleNamespace(identity=fingerprint(cfg), listed_at=time.monotonic())
         self.tools[name] = [{"name": t, "description": "", "schema": {}}
                             for t in ("list_devices", "get_state", "set_state", "health", "discovery", "permit_join")]
         self.status[name] = {"connected": True, "error": None, "at": 0}

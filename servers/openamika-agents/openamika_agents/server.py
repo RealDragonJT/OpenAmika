@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import time
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer as FastMCP
 
 from .jobs import JobStore
 
