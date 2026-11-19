@@ -1204,11 +1204,12 @@ def run_clerk(turn_id: str, user_text: str, spoken: str, thought: str = "", repl
         iot_switched = set()       # smart-home servers that got a real call this pass (their result is on its way to her)
         device_results = {}        # server -> ["turn Reading Lamp off → DONE — …", …]: told to her in one report
         executed = []              # this turn's plain tool calls and their real results, for the follow-up steps
+        sent = []                  # every call this turn dispatched or parked (agent tasks too), never repeated
         round_doc = doc
         for step in range(1 + CLERK_FOLLOW_UPS):
             calls = round_doc.get("calls") if isinstance(round_doc.get("calls"), list) else []
             fresh = []
-            for call in calls[:limits["max_calls"]]:
+            for call in calls[:20]:
                 if not isinstance(call, dict):
                     continue
                 full = str(call.get("tool") or "")
@@ -1230,7 +1231,7 @@ def run_clerk(turn_id: str, user_text: str, spoken: str, thought: str = "", repl
                                f"系统在{user}的原话里找不到他要求这一步的地方。别说已经办好了；问{user}要不要继续）",
                                reply_lang=reply_lang)
                     continue
-                if step and any(full == done[0] and arguments == done[1] for done in executed):
+                if step and (full, arguments) in sent:
                     continue       # a follow-up never repeats a call this turn already made (a write must not run twice)
                 invented = _placeholder_argument(arguments)
                 if invented:
@@ -1243,6 +1244,9 @@ def run_clerk(turn_id: str, user_text: str, spoken: str, thought: str = "", repl
                 agent = is_agent_server(scfg, HUB.tools.get(server))
                 if agent and (tool["name"] in ("answer", "stop") or tool["name"] in AGENT_SYSTEM_TOOLS):
                     continue   # job control goes through `answers`; status/health are the brain's own plumbing
+                if outcome["calls"] >= limits["max_calls"]:
+                    break      # max_calls_per_turn is one budget for the whole turn, follow-up steps included
+                sent.append((full, arguments))
                 if policy == "confirm":
                     from mcp_runtime import fingerprint
                     pid = uuid.uuid4().hex[:10]
@@ -1328,7 +1332,8 @@ def run_clerk(turn_id: str, user_text: str, spoken: str, thought: str = "", repl
             executed += fresh
             # one call may need another's result (create something, then confirm it by the ID it returned): the clerk
             # writes all of a step's calls before any result exists, so it gets the results and one more step
-            if step == CLERK_FOLLOW_UPS or not any(item[3] for item in fresh):
+            if (step == CLERK_FOLLOW_UPS or not any(item[3] for item in fresh)
+                    or outcome["calls"] >= limits["max_calls"]):
                 break
             round_doc = _clerk_follow_up(role_complete, role, messages, executed, user, turn_id)
             if not isinstance(round_doc, dict):

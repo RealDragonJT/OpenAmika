@@ -48,6 +48,21 @@ def test_callback_access_logs_redact_codes():
     assert "[redacted]" in record.getMessage()
 
 
+def test_access_log_filter_keeps_uvicorns_five_request_fields():
+    # uvicorn's AccessFormatter unpacks record.args into exactly five fields; clearing them broke every request line
+    from uvicorn.logging import AccessFormatter
+    args = ("127.0.0.1:5000", "GET", "/api/build_f/tools/oauth/callback?code=secret&state=private", "1.1", 200)
+    record = logging.LogRecord("uvicorn.access", logging.INFO, "", 1, '%s - "%s %s HTTP/%s" %d', args, None)
+    OAuthAccessFilter().filter(record)
+    assert len(record.args) == 5
+    line = AccessFormatter('%(client_addr)s - "%(request_line)s" %(status_code)s', use_colors=False).format(record)
+    assert "callback?[redacted]" in line and "secret" not in line and "200" in line
+    plain = logging.LogRecord("uvicorn.access", logging.INFO, "", 1, '%s - "%s %s HTTP/%s" %d',
+                              ("127.0.0.1:5000", "GET", "/tools", "1.1", 200), None)
+    OAuthAccessFilter().filter(plain)
+    assert plain.args[2] == "/tools"
+
+
 def test_redacted_header_roundtrip_and_changed_url_refusal(tmp_path, monkeypatch):
     monkeypatch.setattr(f_tools, "CONFIG_PATH", tmp_path / "tools.json")
     monkeypatch.setattr(f_tools, "_cfg_sig", None)

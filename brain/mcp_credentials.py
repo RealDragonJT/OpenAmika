@@ -29,7 +29,13 @@ class CredentialStore:
                 import win32crypt
                 raw = win32crypt.CryptUnprotectData(self.path.read_bytes(), None, None, None, 0)[1].decode()
             else:
-                raw = self._keyring().get_password("OpenAmika MCP", self.key)
+                try:
+                    backend = self._keyring()
+                except Exception:
+                    # no usable OS store: nothing can have been saved, so a server without OAuth still connects;
+                    # saving (an actual sign-in) still refuses
+                    return {}
+                raw = backend.get_password("OpenAmika MCP", self.key)
             return json.loads(raw) if raw else {}
 
     @staticmethod

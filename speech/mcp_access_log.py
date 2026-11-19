@@ -2,12 +2,23 @@
 import logging
 import re
 
+_CALLBACK_QUERY = re.compile(r"(/api/build_f/tools/oauth/callback)\?[^\s\"]+")
+
+
+def _redact(value):
+    return _CALLBACK_QUERY.sub(r"\1?[redacted]", value) if isinstance(value, str) else value
+
 
 class OAuthAccessFilter(logging.Filter):
+    """Redacts in place: Uvicorn's access formatter unpacks record.args into its five request fields, so the
+    arguments keep their shape and only the callback's query string is replaced."""
+
     def filter(self, record):
-        message = record.getMessage()
-        record.msg = re.sub(r"(/api/build_f/tools/oauth/callback)\?[^\s\"]+", r"\1?[redacted]", message)
-        record.args = ()
+        record.msg = _redact(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(_redact(arg) for arg in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {key: _redact(arg) for key, arg in record.args.items()}
         return True
 
 

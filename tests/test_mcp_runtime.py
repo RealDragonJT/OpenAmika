@@ -125,6 +125,20 @@ def test_discovery_keeps_long_tool_descriptions(tmp_path):
     assert asyncio.run(scenario())[0]["description"] == long
 
 
+def test_without_an_os_credential_store_reads_are_empty_and_saving_refuses(tmp_path, monkeypatch):
+    # a public server must still connect on a machine without a keyring; a sign-in must not fall back to plaintext
+    import mcp_credentials
+    from mcp.shared.auth import OAuthToken
+    monkeypatch.setattr(mcp_credentials.os, "name", "posix")
+    def no_store():
+        raise RuntimeError("OAuth requires an unlocked operating-system credential store.")
+    monkeypatch.setattr(mcp_credentials.CredentialStore, "_keyring", staticmethod(no_store))
+    store = mcp_credentials.CredentialStore(tmp_path, "public", {"url": "https://example.com/mcp"})
+    assert asyncio.run(store.get_tokens()) is None and store.provider() == {}
+    with pytest.raises(RuntimeError, match="credential store"):
+        asyncio.run(store.set_tokens(OAuthToken(access_token="a", token_type="Bearer")))
+
+
 def test_dpapi_persists_expiry_and_isolates_servers(tmp_path):
     if sys.platform != "win32":
         pytest.skip("Windows DPAPI check")

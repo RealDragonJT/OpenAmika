@@ -1082,3 +1082,21 @@ def test_a_follow_up_quoting_his_request_runs(booking):
     assert [(t, a.get("hold_id")) for t, a in _booking_calls(booking["hub"])] == [("hold_slot", None),
                                                                                  ("confirm_hold", HOLD_ID)]
     assert outcome["refused"] == 0
+
+
+def test_the_call_budget_covers_the_whole_turn(booking):
+    booking["cfg"]["limits"] = {"max_calls_per_turn": 1}
+    booking["script"] += [{"calls": [HOLD_CALL], "note": "hold"}, {"calls": [_confirm(HOLD_ID)], "note": "confirm"}]
+    outcome = f_tools.run_clerk("t-budget", ASK, "Sure.", "")
+    assert [t for t, _ in _booking_calls(booking["hub"])] == ["hold_slot"]
+    assert outcome["calls"] == 1 and len(booking["role_replies"]) == 1     # no follow-up once the budget is spent
+
+
+def test_a_follow_up_never_repeats_an_agent_task(booking):
+    ask = {"tool": "hermes__ask", "quote": "Hold a table for two tonight", "arguments": {"task": "find a restaurant"}}
+    booking["script"] += [{"calls": [HOLD_CALL, ask], "note": "hold and ask"},
+                          {"calls": [ask, _confirm(HOLD_ID)], "note": "ask again and confirm"}]
+    f_tools.run_clerk("t-agent", ASK, "Sure.", "")
+    asks = [c for c in booking["hub"].calls if c[:2] == ("hermes", "ask")]
+    assert len(asks) == 1
+    assert [t for t, _ in _booking_calls(booking["hub"])] == ["hold_slot", "confirm_hold"]
