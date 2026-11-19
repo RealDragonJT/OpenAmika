@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "OpenAmika's first-party MCP server for Zigbee smart-home control via mosquitto + zigbee2mqtt"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.2",
+    "mcp==2.3.0",
     "paho-mqtt>=2.0",
 ]
 

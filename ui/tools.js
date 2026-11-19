@@ -264,10 +264,51 @@
     }
     renderServers(s);
     renderLog(s);
+    renderResults(s.results || []);
+  }
+
+  const connectionActions = new Set();
+  async function connectionAction(name, action, button) {
+    if (connectionActions.has(name)) return;
+    connectionActions.add(name);
+    button.disabled = true;
+    try {
+      const result = await postAction("/api/build_f/tools/" + action, "tools-" + action, { server: name });
+      apply(result);
+      if (result.warning) toast(result.warning, true);
+    } catch (error) { toast(error.message || String(error), true); }
+    finally { connectionActions.delete(name); button.disabled = false; }
+  }
+
+  function renderResults(results) {
+    const box = $("toolResults");
+    const images = results.filter(r => (r.content || []).some(b => b.type === "image"));
+    // Polls should not collapse an open preview or steal its focus.
+    const signature = JSON.stringify(images);
+    if (box.dataset.signature === signature) return;
+    box.dataset.signature = signature;
+    box.hidden = !images.length;
+    box.replaceChildren();
+    if (!images.length) return;
+    box.append(el("h3", { text: "Tool images" }));
+    for (const result of images.slice().reverse()) {
+      const details = el("details", { class: "oa-details" }, el("summary", { text: result.server + " · " + result.tool }));
+      for (const block of result.content) {
+        if (block.type !== "image" || !/^\/api\/build_f\/tools\/attachments\/[a-f0-9]{32}$/.test(block.url || "")) continue;
+        details.append(el("a", { href: block.url, target: "_blank", rel: "noopener noreferrer", text: "Open image ↗" }),
+          el("img", { src: block.url, alt: "Image returned by " + result.tool, loading: "lazy", style: "display:block;max-width:100%;max-height:420px;object-fit:contain;margin:12px 0;" }),
+          el("p", { class: "card-hint", text: block.analysis ? "Vision: " + block.analysis : "Image retained; visual analysis unavailable." }));
+      }
+      box.append(details);
+    }
   }
 
   function renderServers(s) {
     const box = $("serversBox");
+    const active = document.activeElement;
+    if ((box.contains(active) || $("iotServer").contains(active)) && active.matches("input, textarea, select")) return;
+    const focusKey = active && ["data-connect", "data-disconnect", "data-auth"].find(key => active.hasAttribute(key));
+    const focusName = focusKey ? active.getAttribute(focusKey) : null;
     box.replaceChildren();
     const entries = Object.entries(s.servers || {});
     if (!entries.length) {
@@ -339,6 +380,27 @@
           },
         }));
       card.append(head);
+      if (server.transport === "http") {
+        const busy = ["connecting", "authorizing"].includes(server.connection_state);
+        const row = el("div", { class: "form-row", style: "margin-top:10px;" });
+        const connect = el("button", { class: "btn small", text: busy ? "Connecting…" : server.connection_state === "auth_required" ? "Sign in" : server.connected ? "Reconnect" : "Connect",
+          "data-connect": name, onclick: event => connectionAction(name, "connect", event.currentTarget) });
+        connect.disabled = busy || connectionActions.has(name);
+        row.append(connect);
+        if (server.connected || busy || server.connection_state === "auth_required") row.append(el("button", {
+          class: "btn small", text: busy ? "Cancel connection" : "Disconnect account", "data-disconnect": name,
+          onclick: event => connectionAction(name, "disconnect", event.currentTarget) }));
+        if (server.protocol_version) row.append(el("span", { class: "card-hint", text: "MCP " + server.protocol_version }));
+        card.append(row);
+        const auth = server.authorization;
+        if (auth && auth.url) {
+          let url;
+          try { url = new URL(auth.url); } catch (_) { url = null; }
+          if (url && ["http:", "https:"].includes(url.protocol)) card.append(el("div", { class: "card-hint" },
+            el("p", { text: "Sign in with " + (auth.issuer || url.hostname) + (auth.scope ? " · Permissions: " + auth.scope : "") }),
+            el("a", { href: auth.url, target: "_blank", rel: "noopener noreferrer", text: "Continue to sign in ↗", "data-auth": name })));
+        }
+      }
       if (server.blocked) card.append(el("div", { class: "card-hint", style: "color:var(--warn);margin-top:8px;",
         text: "Switched on in tools.json, but held off until the IoT safety statement is accepted (Smart Home and IoT card)." }));
       else if (server.error) card.append(el("div", { class: "card-hint", style: "color:var(--err);margin-top:8px;", text: server.error }));
@@ -386,6 +448,10 @@
       if (name === "iot") { card.classList.add("embedded"); $("iotServer").replaceChildren(card); }
       else box.append(card);
     }
+    if (focusKey) {
+      const replacement = [...box.querySelectorAll("[" + focusKey + "]")].find(node => node.getAttribute(focusKey) === focusName);
+      if (replacement && !replacement.disabled) replacement.focus({ preventScroll: true });
+    }
   }
 
   function renderLog(s) {
@@ -419,9 +485,9 @@
   });
 
   $("addTransport").addEventListener("change", () => {
-    const http = $("addTransport").value === "http";
+    const http = $("addTransport").value !== "stdio";
     $("addTargetLabel").textContent = http ? "Server URL" : "Command + args (first word = command)";
-    $("addTarget").placeholder = http ? "http://homeassistant.local:8123/mcp_server/sse" : "python -m openamika_agents hermes";
+    $("addTarget").placeholder = http ? "https://example.com/mcp" : "python -m openamika_agents hermes";
   });
   $("addBtn").addEventListener("click", () => {
     const name = $("addName").value.trim();
@@ -430,8 +496,8 @@
     if (!target) { toast("Target is required.", true); return; }
     const cfg = mergedConfig();
     if (cfg.mcpServers[name]) { toast("A server with that name exists.", true); return; }
-    if ($("addTransport").value === "http") {
-      cfg.mcpServers[name] = { url: target, enabled: false };
+    if ($("addTransport").value !== "stdio") {
+      cfg.mcpServers[name] = { url: target, transport: $("addTransport").value, enabled: false };
     } else {
       const parts = target.split(/\s+/);
       cfg.mcpServers[name] = { command: parts[0], args: parts.slice(1), enabled: false };

@@ -1,4 +1,4 @@
-# Use page browser checks
+# UI browser checks
 
 From the repository root, with Node.js 24 and pnpm installed:
 
@@ -13,6 +13,9 @@ sizes. They exercise keyboard dismissal and focus, fullscreen and its fallback,
 saved lock and camera-preview state, reconnects, retained text, media cancellation,
 permission retry, a failed microphone start or switch, and a missing saved device.
 Browser script errors fail the checks.
+Tools checks exercise sign-in, cancellation, focus across status polling, and image
+previews at desktop and phone sizes. OAuth and tool responses are fixtures; these
+checks do not log into a real provider. Screenshots are saved under `.venv/artifacts/`.
 The thinking-state disconnect check uses a ready-avatar fixture to verify immediate
 busy-display cleanup, timer cancellation, and protection from old socket callbacks.
 Navigation checks cover both mode labels, resizing, and centered wrapping. A PNG
