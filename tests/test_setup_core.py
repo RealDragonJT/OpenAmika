@@ -38,6 +38,19 @@ def test_gpu_line_parsing():
     assert core.parse_gpu("") is None and core.parse_gpu("No devices were found") is None
 
 
+def test_a_gpu_that_shares_the_system_memory_is_a_gpu(tmp_path, monkeypatch):
+    """A DGX Spark's GB10 has no memory of its own to report: nvidia-smi answers [N/A]. It used to be read as "no
+    NVIDIA GPU", and setup installed the CPU builds. Its size is the machine's RAM."""
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal:       127540704 kB\nMemFree:        20512340 kB\n", encoding="ascii")
+    assert core.system_ram_mib(meminfo) == 124551
+    assert core.system_ram_mib(tmp_path / "absent") == 0
+    monkeypatch.setattr(core, "system_ram_mib", lambda: 124551)
+    gpu = core.parse_gpu("NVIDIA GB10, [N/A]\n")
+    assert gpu == ("NVIDIA GB10", 124551)
+    assert core.vision_wanted("auto", "cuda", gpu)[0] is True
+
+
 def test_her_eyes_need_a_16_gb_card_unless_asked():
     big, small = ("RTX 5080", 16303), ("RTX 4070", 12282)
     assert core.vision_wanted("auto", "cuda", big)[0] is True

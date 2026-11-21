@@ -183,7 +183,20 @@ def parse_gpu(text: str) -> Optional[tuple[str, int]]:
         name, _, mib = line.rpartition(",")
         if name.strip() and mib.strip().isdigit():
             return name.strip(), int(mib.strip())
+        if name.strip() and mib.strip() == "[N/A]":     # unified memory (a DGX Spark's GB10): the GPU shares the RAM
+            return name.strip(), system_ram_mib()
     return None
+
+
+def system_ram_mib(meminfo: Path = Path("/proc/meminfo")) -> int:
+    """Total system RAM in MiB (Linux), 0 when unknown."""
+    try:
+        for line in meminfo.read_text(encoding="ascii").splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
 
 
 def vision_wanted(mode: str, device: str, gpu: Optional[tuple[str, int]]) -> tuple[bool, str]:
