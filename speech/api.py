@@ -1991,6 +1991,7 @@ _vision_desc_ts: float = 0.0
 _vision_her_line: str = ""
 _vision_lang: str = "CHINESE"
 _vision_camera_clients: int = 0
+_vision_stale: str = ""               # what the vision service still answers after the last camera left
 _vlm_subscribers: list = []            # [(WebSocket, asyncio.Queue)]
 _vision_poll_task = None
 
@@ -2009,9 +2010,33 @@ _VISION_SUFFIX_TEMPLATES = {
 
 
 def _vision_fresh_desc() -> str:
-    if _vision_desc and (time.time() - _vision_desc_ts) <= VISION_EXPIRE_SEC:
+    # She sees only while a camera is connected. The vision service keeps answering with its last description
+    # after the frames stop, so the age of a poll says nothing about the age of the picture.
+    if _vision_camera_clients > 0 and _vision_desc and (time.time() - _vision_desc_ts) <= VISION_EXPIRE_SEC:
         return _vision_desc
     return ""
+
+
+def _vision_take(desc: str) -> None:
+    """A description polled from the vision service: kept only while a camera is connected, and not when it is the
+    one that was current when the last camera left (the service repeats that one until it sees a new frame)."""
+    global _vision_desc, _vision_desc_ts, _vision_stale
+    if _vision_camera_clients <= 0 or not desc or desc == _vision_stale:
+        return
+    _vision_stale = ""
+    _vision_desc = desc
+    _vision_desc_ts = time.time()
+
+
+def _vision_camera_left() -> None:
+    """One camera client disconnected. With the last one gone she sees nothing: the description is dropped, and
+    remembered as stale so that the service's repeat of it is not taken for a new one when a camera returns."""
+    global _vision_camera_clients, _vision_desc, _vision_desc_ts, _vision_stale
+    _vision_camera_clients = max(0, _vision_camera_clients - 1)
+    if _vision_camera_clients == 0:
+        _vision_stale = _vision_desc or _vision_stale
+        _vision_desc = ""
+        _vision_desc_ts = 0.0
 
 
 def vision_suffix_for(text: str) -> str:
@@ -2080,7 +2105,6 @@ def vision_note_user_lang(lang: str):
 
 async def _vision_poll_loop():
     """Poll the vision service for the latest description (like the orchestrator did)."""
-    global _vision_desc, _vision_desc_ts
     timeout = aiohttp.ClientTimeout(total=2)
     while True:
         try:
@@ -2091,8 +2115,7 @@ async def _vision_poll_loop():
                             data = await resp.json()
                         desc = (data.get("description") or "").strip()
                         if desc and data.get("ok"):
-                            _vision_desc = desc
-                            _vision_desc_ts = time.time()
+                            _vision_take(desc)
                     except Exception:
                         pass
                     await asyncio.sleep(0.7)
@@ -2128,7 +2151,7 @@ async def ws_camera(ws: WebSocket):
     except Exception as error:
         logger.debug(f"[vision] camera ws error: {error}")
     finally:
-        _vision_camera_clients = max(0, _vision_camera_clients - 1)
+        _vision_camera_left()
         logger.info("[vision] camera client disconnected")
 
 
