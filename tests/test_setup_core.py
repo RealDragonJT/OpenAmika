@@ -75,7 +75,21 @@ def test_settings_point_at_the_new_environments(checkout):
     cpu = core.settings_from_example("cpu", vision_on=False)
     assert cpu["speech_device"] == "cpu" and cpu["embedder"]["device"] == "cpu" and cpu["embedder"]["dtype"] == "fp32"
     assert cpu["vision"]["enabled"] is False
-    assert cpu["services"]["tts"]["command"][0].endswith("python.exe")        # her voice server block is kept
+    tts = cpu["services"]["tts"]                                              # her voice server block is kept
+    assert Path(tts["command"][0]).parts == ("vendor", "tts-engine", ".venv", *venv) and tts["command"][1] == "main.py"
+    assert Path(tts["cwd"]).parts == ("vendor", "tts-engine")
+
+
+def test_the_voice_server_path_is_the_one_settings_example_json_has_on_windows(checkout):
+    """On Windows the voice server's command and folder stay exactly as settings.example.json writes them; elsewhere
+    they name the venv's bin/python and a / path, so the launcher finds it on Linux and macOS."""
+    example = json.loads((checkout / "settings.example.json").read_text("utf-8-sig"))["services"]["tts"]
+    tts = core.settings_from_example("cuda", vision_on=False)["services"]["tts"]
+    if core.IS_WIN:
+        assert tts["command"] == example["command"] and tts["cwd"] == example["cwd"]
+    else:
+        assert tts["command"][0] == "vendor/tts-engine/.venv/bin/python" and tts["cwd"] == "vendor/tts-engine"
+        assert tts["command"][1:] == example["command"][1:]
 
 
 def test_a_conda_environment_from_the_old_readme_is_used_as_it_is(checkout):

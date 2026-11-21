@@ -642,12 +642,18 @@ def ensure_hf_model(label: str, vpy: Path, folder: Path, repo: str, cmd: list[st
 # ---- settings.json and brain/.env ---------------------------------------------------------------------------------
 def settings_from_example(device: str, vision_on: bool) -> dict:
     """settings.example.json with this machine's environments and device: the interpreters found (a venv's or a conda
-    environment's), the CPU instead of CUDA without an NVIDIA GPU, and her eyes on when they were installed."""
+    environment's), her voice server's venv in this platform's layout, the CPU instead of CUDA without an NVIDIA GPU,
+    and her eyes on when they were installed."""
     cfg = json.loads((ROOT / "settings.example.json").read_text(encoding="utf-8-sig"))
     cfg["brain_python"] = rel(env_python(ENVS / "brain"))
     cfg["speech_python"] = rel(env_python(ENVS / "speech"))
     cfg.setdefault("embedder", {})["python"] = rel(env_python(ENVS / "embed"))
     cfg.setdefault("vision", {})["python"] = rel(env_python(ENVS / "vision"))
+    tts = (cfg.get("services") or {}).get("tts")
+    if isinstance(tts, dict) and tts.get("command"):       # her voice server: scripts/setup_tts.py makes this venv
+        engine = ROOT / "vendor" / "tts-engine"
+        tts["command"][0] = rel(env_python(engine / ".venv"))
+        tts["cwd"] = rel(engine)
     if device == "cpu":
         cfg["speech_device"] = "cpu"
         cfg["embedder"].update(device="cpu", dtype="fp32")
