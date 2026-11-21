@@ -184,7 +184,9 @@ def parse_gpu(text: str) -> Optional[tuple[str, int]]:
         if name.strip() and mib.strip().isdigit():
             return name.strip(), int(mib.strip())
         if name.strip() and mib.strip() == "[N/A]":     # unified memory (a DGX Spark's GB10): the GPU shares the RAM
-            return name.strip(), system_ram_mib()
+            ram = system_ram_mib()
+            if ram:                                     # known on Linux only: elsewhere the line means what it meant
+                return name.strip(), ram
     return None
 
 

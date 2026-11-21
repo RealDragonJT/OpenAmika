@@ -49,6 +49,11 @@ def test_a_gpu_that_shares_the_system_memory_is_a_gpu(tmp_path, monkeypatch):
     gpu = core.parse_gpu("NVIDIA GB10, [N/A]\n")
     assert gpu == ("NVIDIA GB10", 124551)
     assert core.vision_wanted("auto", "cuda", gpu)[0] is True
+    # where the system's memory cannot be read this way (Windows, macOS) the line stays what it was: no GPU found,
+    # never "a GPU with 0 GB" that would bring the CUDA builds; and a later line with a size is still taken
+    monkeypatch.setattr(core, "system_ram_mib", lambda: 0)
+    assert core.parse_gpu("NVIDIA GB10, [N/A]\n") is None
+    assert core.parse_gpu("Some GPU, [N/A]\nNVIDIA GeForce RTX 5090, 32607\n") == ("NVIDIA GeForce RTX 5090", 32607)
 
 
 def test_her_eyes_need_a_16_gb_card_unless_asked():
