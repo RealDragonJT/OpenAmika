@@ -3,8 +3,9 @@
 A setup for an RTX 3090, 3090 Ti or 4090: her brain, her voice, her ears, her memory and her eyes on one PC, with
 nothing sent to OpenRouter.
 
-> Worked out and measured by **Denn96** on an RTX 3090 (pull request #12). Edited by MekaHime, who has no 24 GB card
-> and has not run it: the memory figures below are the contributor's.
+> Worked out and measured by [**Denn96**](https://github.com/Denn96) on an RTX 3090
+> ([pull request #12](https://github.com/zeekk0/OpenAmika/pull/12)). Edited by MekaHime, who has no 24 GB card and
+> has not run it: the memory figures below are the contributor's.
 
 ## Why it needs a setup of its own
 
