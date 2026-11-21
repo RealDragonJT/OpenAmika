@@ -563,8 +563,9 @@ Invoke-RestMethod -Method Post -Uri "$page/api/build_f/ollama/use" -ContentType 
   and the memory table above are yours to apply.
 - Back to OpenRouter: Setup → Brain → OpenRouter → "Switch back to the OpenRouter preset".
 - The wizard and Setup → Brain show "She will not sound like herself. Use 27B or more, or the OpenRouter preset."
-  for a model under 27B parameters (Ollama's `parameter_size`, else the size in its name; `gemma4:26b`, the tested
-  mixture of experts, is exempt). It is a warning, not a refusal, and nothing checks her replies by script.
+  for a model under 27B parameters (Ollama's `parameter_size`, else the size in its name; Gemma 4 26B, the tested
+  mixture of experts, is exempt under any name: `gemma4:26b…`, `Gemma-4-26B`, `nvidia/Gemma-4-26B-A4B-NVFP4`). It is a
+  warning, not a refusal, and nothing checks her replies by script.
 
 **A model that left OpenRouter's catalog.** After its boot-time resume the brain reads OpenRouter's public model
 list (`/api/v1/models`) once, then at most every 30 minutes when a page asks: `GET /api/build_f/openrouter/catalog` →
