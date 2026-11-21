@@ -9,10 +9,12 @@ import contextlib
 import http.client
 import io
 import json
+import socket
 import sys
 import threading
 import time
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -47,6 +49,8 @@ class ModelServer:
         self.asked, self.headers = [], []
         self.chunks, self.status, self.error = [], 200, None
         self.end_marker, self.endless = True, False
+        self.whole = None                       # a whole (not streamed) answer to give as it is
+        self.wait = 0.0                         # seconds before the first byte of an answer
         self.hung_up = threading.Event()
         stand_in = self
 
@@ -69,8 +73,11 @@ class ModelServer:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 stand_in.asked.append(body)
                 stand_in.headers.append({name.lower(): value for name, value in self.headers.items()})
+                time.sleep(stand_in.wait)
                 if stand_in.status != 200:
                     return self.send(stand_in.status, {"error": {"message": stand_in.error, "type": "BadRequestError"}})
+                if not body.get("stream") and stand_in.whole is not None:
+                    return self.send(200, stand_in.whole)
                 if not body.get("stream"):
                     text = "".join(c["choices"][0]["delta"].get("content", "") for c in stand_in.chunks if c["choices"])
                     usage = next((c["usage"] for c in stand_in.chunks if c.get("usage")), {})
@@ -205,6 +212,95 @@ class ThroughOpenAmikaTests(BridgeCase):
         self.assertTrue(self.model_server.hung_up.wait(5), "the model server was left generating")
 
 
+class WhenTheModelServerFailsTests(BridgeCase):
+    """What the review of 2026-11-20 found: three ways a failing server passed for a finished reply or broke the
+    bridge itself."""
+
+    def chat(self, **more):
+        printed = io.StringIO()
+        with contextlib.redirect_stderr(printed):
+            answer = requests.post(self.url + "/api/chat", timeout=5, stream=True, json=dict(
+                {"model": MODEL, "messages": [{"role": "user", "content": "u"}]}, **more))
+            lines = [json.loads(line) for line in answer.iter_lines() if line]
+        return answer, lines, printed.getvalue()
+
+    def test_an_error_object_in_the_middle_of_an_answer_is_an_error_and_not_its_end(self):
+        """Some servers write {"object": "error", ...} and then "[DONE]". What came before is not a finished reply."""
+        self.model_server.chunks = [chunk("Hel"), {"object": "error", "message": "CUDA out of memory", "code": 500}]
+        answer, lines, printed = self.chat()
+        self.assertEqual(lines[0]["message"]["content"], "Hel")
+        self.assertEqual(lines[-1], {"error": "CUDA out of memory"})
+        self.assertFalse(any(line.get("done") for line in lines), "no line says the reply is finished")
+        self.assertIn("CUDA out of memory", printed)
+        client = self.client()                  # and OpenAmika does not book the fragment as something she said
+        config = ollama_role_config(self.ollama, MODEL, "deep")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(Exception):
+            list(client.stream(config, [{"role": "user", "content": "u"}], metadata={"phase": "deep"}))
+        self.assertNotEqual(self.receipts[0]["status"], "complete")
+
+    def test_a_whole_answer_with_no_reply_in_it_is_an_error(self):
+        for whole, reason in (({"model": MODEL, "choices": [], "usage": {}}, "no reply in it"),
+                              ({"object": "error", "message": "the model is not loaded"}, "the model is not loaded"),
+                              ({"error": {"message": "out of memory"}}, "out of memory")):
+            self.model_server.whole = whole
+            answer, lines, _ = self.chat(stream=False)
+            self.assertEqual(answer.status_code, 502, whole)
+            self.assertIn(reason, lines[0]["error"])
+        self.model_server.whole = {"model": MODEL, "choices": [{"index": 0, "finish_reason": "stop",
+                                                                 "message": {"role": "assistant", "content": ""}}]}
+        answer, lines, _ = self.chat(stream=False)      # a reply that is empty is still a reply
+        self.assertEqual((answer.status_code, lines[0]["done"], lines[0]["message"]["content"]), (200, True, ""))
+
+    def test_a_token_count_that_is_not_a_number_does_not_break_the_answer(self):
+        self.model_server.chunks = [chunk("Hi"), chunk(finish="stop"),
+                                    chunk(usage={"prompt_tokens": "many", "completion_tokens": {"n": 2}})]
+        answer, lines, printed = self.chat()
+        self.assertEqual([line.get("done") for line in lines], [False, True])
+        self.assertEqual((lines[-1]["prompt_eval_count"], lines[-1]["eval_count"]), (0, 0))
+        self.assertEqual(printed, "")
+        self.assertEqual([bridge.count(v) for v in (7, "8", None, -3, "x", [1], 2.9, float("inf"))], [7, 8, 0, 0, 0, 0, 2, 0])
+
+    def test_an_answer_that_is_only_the_end_marker_is_an_error(self):
+        self.model_server.chunks = []               # the server writes "[DONE]" and nothing before it
+        answer, lines, _ = self.chat()
+        self.assertIn("no reply in it", lines[-1]["error"])
+        self.assertFalse(any(line.get("done") for line in lines))
+
+    def test_the_idle_limit_is_not_the_patience_with_an_answer(self):
+        """The limit is for a caller that sends nothing. A model server that thinks before its first word, and a
+        caller that reads a long answer slowly, both take longer than that and must not be cut off."""
+        with mock.patch.object(bridge.Handler, "timeout", 0.3):
+            self.model_server.wait = 1.0
+            self.model_server.chunks = [chunk("Hi"), chunk(finish="stop")]
+            answer, lines, _ = self.chat()
+            self.assertEqual([line.get("done") for line in lines], [False, True], "a slow first word")
+            for stream in (False,):
+                answer, lines, _ = self.chat(stream=stream)
+                self.assertEqual((answer.status_code, lines[0]["done"]), (200, True), "a slow whole answer")
+            self.model_server.wait = 0.0
+            self.model_server.chunks = [chunk("word " * 40) for _ in range(3000)] + [chunk(finish="stop")]
+            caller = http.client.HTTPConnection("127.0.0.1", self.bridge.server_address[1], timeout=20)
+            self.addCleanup(caller.close)
+            caller.request("POST", "/api/chat", body=json.dumps(
+                {"model": MODEL, "messages": [{"role": "user", "content": "u"}]}), headers={"Content-Type": "application/json"})
+            response = caller.getresponse()
+            first = json.loads(response.readline())
+            time.sleep(1.0)                         # the caller stops reading for longer than the idle limit
+            rest = [json.loads(line) for line in response.read().splitlines() if line.strip()]
+            self.assertEqual(first["message"]["content"], "word " * 40)
+            self.assertEqual(len(rest), 3000, "every line of a long answer arrives")
+            self.assertTrue(rest[-1]["done"])
+
+    def test_a_caller_that_says_nothing_gives_its_thread_back(self):
+        self.assertTrue(0 < bridge.Handler.timeout <= 120)
+        with mock.patch.object(bridge.Handler, "timeout", 0.3):
+            idle = socket.create_connection(("127.0.0.1", self.bridge.server_address[1]), timeout=5)
+            try:
+                self.assertEqual(idle.recv(1), b"", "the bridge closes a connection that sends nothing")
+            finally:
+                idle.close()
+
+
 class OllamaShapeTests(BridgeCase):
     def get(self, path, **headers):
         return requests.get(self.url + path, headers=headers, timeout=5)
@@ -302,6 +398,47 @@ class LocalOnlyTests(unittest.TestCase):
         with self.assertRaises(bridge.BridgeError) as raised:
             backend.request("GET", "/models")
         self.assertIn("only talks to local servers", raised.exception.message)
+
+
+class EveryAddressOfANameTests(BridgeCase):
+    """On Windows "localhost" stands for ::1 before 127.0.0.1, and the recipes start the model server on 127.0.0.1:
+    the bridge used the first address only and reported a running server as not answering."""
+
+    def record(self):
+        tried = []
+        real = http.client.HTTPConnection
+
+        class Recording(real):
+            def __init__(self, host, *args, **kwargs):
+                tried.append(host)
+                super().__init__(host, *args, **kwargs)
+
+        patch = mock.patch.object(bridge.http.client, "HTTPConnection", Recording)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return tried
+
+    def test_a_name_whose_first_address_refuses_is_reached_at_the_next_and_then_at_once(self):
+        backend, tried = self.bridge.backend, self.record()
+        with mock.patch.object(bridge, "local_addresses", return_value=["127.0.0.2", "127.0.0.1", "127.0.0.1"]):
+            self.assertEqual([row["id"] for row in backend.models()], [MODEL])
+            self.assertEqual(tried, ["127.0.0.2", "127.0.0.1"])         # nothing listens on the first
+            del tried[:]
+            self.assertEqual([row["id"] for row in backend.models()], [MODEL])
+            self.assertEqual(tried, ["127.0.0.1"], "the address that answered is tried first from then on")
+
+    def test_ipv4_is_tried_before_ipv6(self):
+        backend, tried = self.bridge.backend, self.record()
+        with mock.patch.object(bridge, "local_addresses", return_value=["::1", "127.0.0.1"]):
+            self.assertEqual([row["id"] for row in backend.models()], [MODEL])
+        self.assertEqual(tried, ["127.0.0.1"])
+
+    def test_when_no_address_answers_the_reason_is_the_last_refusal(self):
+        self.model_server.close()
+        with self.assertRaises(bridge.BridgeError) as raised:
+            self.bridge.backend.models()
+        self.assertEqual(raised.exception.status, 502)
+        self.assertIn("is not answering", raised.exception.message)
 
 
 class RequestTests(unittest.TestCase):

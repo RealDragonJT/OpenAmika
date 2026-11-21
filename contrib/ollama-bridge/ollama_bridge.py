@@ -29,6 +29,7 @@ VERSION = "0.1.0"
 DEFAULT_LISTEN = "127.0.0.1:11435"      # beside a real Ollama on 11434, not in its place
 CONNECT_TIMEOUT_S = 10
 READ_TIMEOUT_S = 600                    # the patience OpenAmika has with Ollama itself
+IDLE_TIMEOUT_S = 60                     # a caller that sends nothing for this long gives its thread back
 MAX_BODY = 8 << 20
 # Ollama option -> OpenAI field. num_ctx and keep_alive have no counterpart: the server fixed both when it started.
 OPTIONS = {"num_predict": "max_tokens", "temperature": "temperature", "top_p": "top_p", "seed": "seed", "stop": "stop"}
@@ -86,15 +87,34 @@ class Backend:
         self.host, self.port = parts.hostname, port
         self.prefix = parts.path.rstrip("/") or "/v1"
         self.url = f"http://{parts.netloc}{self.prefix}"
+        self.answered_at = None                         # the address that took the last connection
         try:
             local_addresses(self.host, self.port)       # refuse a public address at start, not at her first turn
         except BridgeError as error:
             raise ValueError(error.message) from None
 
+    def connect(self):
+        """A connection to the model server, at the first of the name's addresses that takes one. A name can stand
+        for several: on Windows "localhost" is ::1 before 127.0.0.1, and a server started on 127.0.0.1 answers only
+        the second. The address that answered last is tried first, then IPv4, so only a first call pays for a refusal."""
+        addresses = list(dict.fromkeys(local_addresses(self.host, self.port)))     # every call: a name can change
+        addresses.sort(key=lambda address: (address != self.answered_at, ":" in address))
+        refusal = None
+        for address in addresses:
+            connection = http.client.HTTPConnection(address, self.port, timeout=CONNECT_TIMEOUT_S)
+            try:
+                connection.connect()
+            except OSError as error:
+                connection.close()
+                refusal = error
+                continue
+            self.answered_at = address
+            return connection
+        raise BridgeError(502, f"The model server at {self.url} is not answering: {refusal}")
+
     def request(self, method, path, body=None):
         """Send one request. Returns (connection, response); the caller closes the connection."""
-        address = local_addresses(self.host, self.port)[0]      # every call: a name can change what it stands for
-        connection = http.client.HTTPConnection(address, self.port, timeout=CONNECT_TIMEOUT_S)
+        connection = self.connect()
         headers = {"Host": f"{self.host}:{self.port}", "Accept": "application/json"}
         payload = None
         if body is not None:
@@ -128,6 +148,19 @@ class Backend:
 
 def now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def count(value):
+    """A token count as the server gave it; 0 when it is not a number (a count must never break an answer)."""
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def failed(answer):
+    """True for an error object: {"error": ...}, or the older {"object": "error", "message": ...}."""
+    return isinstance(answer, dict) and bool(answer.get("error") or answer.get("object") == "error")
 
 
 def tag(row):
@@ -183,6 +216,7 @@ class Reply:
     def __init__(self, model):
         self.model, self.started = model, time.monotonic()
         self.finish, self.prompt_tokens, self.completion_tokens = None, 0, 0
+        self.answered = False                   # the server has sent a choice: there is a reply, however short
 
     def take(self, chunk):
         """One OpenAI chunk, or a whole completion: returns (content, thinking), keeps the usage and finish reason."""
@@ -190,10 +224,11 @@ class Reply:
             return "", ""
         usage = chunk.get("usage")
         if isinstance(usage, dict):
-            self.prompt_tokens = int(usage.get("prompt_tokens") or 0)
-            self.completion_tokens = int(usage.get("completion_tokens") or 0)
+            self.prompt_tokens = count(usage.get("prompt_tokens"))
+            self.completion_tokens = count(usage.get("completion_tokens"))
         choices = chunk.get("choices")
         choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+        self.answered = self.answered or bool(choice)
         if choice.get("finish_reason"):
             self.finish = str(choice["finish_reason"])
         part = choice.get("delta") or choice.get("message")
@@ -230,7 +265,7 @@ def events(response, reply):
                 event = json.loads(payload)
             except ValueError:
                 continue
-            if isinstance(event, dict) and event.get("error"):
+            if failed(event):                   # also when "[DONE]" follows it: what came before is not a reply
                 raise BridgeError(502, error_text(event) or "The model server reported an error")
             yield event
     except (OSError, http.client.HTTPException) as error:
@@ -243,6 +278,7 @@ def events(response, reply):
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "ollama-bridge/" + VERSION
+    timeout = IDLE_TIMEOUT_S                    # between requests and while one is read; an answer gets more (chat)
 
     def log_message(self, format, *args):
         if self.server.verbose:                 # the request line and status only: never a message's text
@@ -361,11 +397,18 @@ class Handler(BaseHTTPRequestHandler):
         reply = Reply(request["model"])
         connection, response = self.server.backend.request("POST", "/chat/completions", request)
         try:
+            # An answer is on its way: a caller that reads it slowly gets the patience Ollama has, not an idler's.
+            self.connection.settimeout(READ_TIMEOUT_S)
             if not request["stream"]:
                 try:
-                    content, thinking = reply.take(json.loads(response.read()))
+                    whole = json.loads(response.read())
                 except (ValueError, OSError, http.client.HTTPException):
                     raise BridgeError(502, "The model server's answer is not JSON") from None
+                if failed(whole):
+                    raise BridgeError(502, error_text(whole) or "The model server reported an error")
+                content, thinking = reply.take(whole)
+                if not reply.answered:          # no choice in it: an empty reply would be booked as a complete one
+                    raise BridgeError(502, "The model server's answer has no reply in it")
                 return self.send_json(200, reply.line(content, thinking, done=True))
             self.send_response(200)
             self.send_header("Content-Type", "application/x-ndjson")
@@ -376,6 +419,8 @@ class Handler(BaseHTTPRequestHandler):
                     content, thinking = reply.take(event)
                     if content or thinking:
                         self.send_line(reply.line(content, thinking))
+                if not reply.answered:          # "[DONE]" and nothing before it: as for a whole answer, not a reply
+                    raise BridgeError(502, "The model server's answer has no reply in it")
                 self.send_line(reply.line(done=True))
             except BridgeError as error:        # the headers are out: say it the way Ollama does mid-answer
                 self.report(error)
@@ -383,6 +428,10 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"0\r\n\r\n")
         finally:
             connection.close()                  # also what stops the server generating once OpenAmika hangs up
+            try:
+                self.connection.settimeout(self.timeout)
+            except OSError:
+                pass
 
 
 class Server(ThreadingHTTPServer):

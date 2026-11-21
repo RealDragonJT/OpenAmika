@@ -12,6 +12,10 @@ changes: to her it is Ollama, with a model per role and calls booked at zero cos
 It is one Python file with no dependencies beyond the standard library. OpenAmika does not load it or know that
 it is there: if you never start it, nothing about OpenAmika is different.
 
+> A community contribution by realtime3392 (pull request #13). MekaHime does not run vLLM: the recipes below are the
+> contributor's, and each says what was run. Problems with the bridge itself and fixes to it are welcome as GitHub
+> issues and pull requests; for installing vLLM, the projects the recipes link to are the place to ask.
+
 ## Local servers only
 
 The bridge cannot be pointed at a hosted API, and it has nothing to do with API keys:
@@ -88,6 +92,13 @@ which wants Python 3.12 and an NVIDIA driver with CUDA 13.
    [vllm-windows#96](https://github.com/SystemPanic/vllm-windows/issues/96)), and past that it would compile itself with
    tools a normal PC does not have. With more than one NVIDIA GPU, pick the card with
    `$env:CUDA_DEVICE_ORDER = 'PCI_BUS_ID'` and `$env:CUDA_VISIBLE_DEVICES = '<index from nvidia-smi>'`.
+
+   On a PC with one NVIDIA card, mind the card's memory: vLLM takes 90% of it unless it is told otherwise
+   (`--gpu-memory-utilization`, 0.9 by default), and her ears, her memory and her voice need about 5.5 GB of the same
+   card (about 10 GB with her eyes). Give vLLM what is left, with 1 GB to spare: (card − 5.5 − 1) / card, which is
+   about 0.8 on a 32 GB card, or (card − 10 − 1) / card with her eyes, about 0.65. The model's 18.8 GB must fit into
+   that share, so a 24 GB card is too small for it next to her. This is arithmetic from what the two programs
+   document, added in review; it has not been tried.
 
 3. In a second window, from the OpenAmika folder, start the bridge:
 
@@ -187,9 +198,9 @@ Not written yet: it will be added once it has been run. PyPI has the vLLM wheel 
 
 Coming back, the answer's text becomes `message.content`, reasoning the server reports apart from the answer becomes
 `message.thinking`, and the server's token counts become `prompt_eval_count` and `eval_count`. An error from the
-server reaches OpenAmika with its reason. An answer that breaks off before the server finished it is reported as an
-error, not as a short reply. When OpenAmika hangs up, on Unlock for example, the bridge hangs up on the server, which
-stops generating.
+server reaches OpenAmika with its reason, also when it arrives in the middle of an answer. An answer that breaks off
+before the server finished it, or a whole answer with no reply in it, is reported as an error, not as a short reply.
+When OpenAmika hangs up, on Unlock for example, the bridge hangs up on the server, which stops generating.
 
 **The thinking switch.** OpenAmika lets only the reflection think and switches thinking off for the roles she
 speaks with, when Ollama says the model can think. The bridge says so for every model, so the switch is always sent
