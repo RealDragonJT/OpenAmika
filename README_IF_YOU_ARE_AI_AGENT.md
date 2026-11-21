@@ -486,7 +486,7 @@ memory (bge-m3, fp16) ~1.4 GB, voice (GPT-SoVITS) ~2.5 GB, Windows and the brows
 | her GPU | a 27–32B model next to her | a 70B model next to her |
 |---|---|---|
 | 16 GB or less | no | no |
-| 24 GB (RTX 3090, 3090 Ti, 4090, 5090 Laptop, RTX PRO 4000) | no: ≈ 19 + 6 = 25 GB even with her eyes off | no |
+| 24 GB (RTX 3090, 3090 Ti, 4090, 5090 Laptop, RTX PRO 4000) | no: ≈ 19 + 6 = 25 GB even with her eyes off. A user's setup that fits under 24 GB (the 16 GB build of Gemma 4 26B, her ears and memory on the CPU, small eyes; measured by them, not by MekaHime): [docs/LOCAL_24GB.md](docs/LOCAL_24GB.md) | no |
 | 32 GB (RTX 5090, RTX PRO 4500) | `gemma3:27b` with all of her, eyes included (≈ 29.5 GB); `qwen3:32b` only with her eyes off (≈ 30 GB) | no |
 | 48 GB (RTX PRO 5000 48 GB, RTX 6000 Ada, RTX A6000) | either, with all of her (≤ 34 GB) | no: ≈ 46–50 GB for the model alone |
 | 72–96 GB (RTX PRO 5000 72 GB, RTX PRO 6000) | either | yes, with all of her (≤ 61 GB) |

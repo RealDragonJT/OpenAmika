@@ -249,7 +249,8 @@ replies, runs one of two ways:
 A local model needs its own video memory on top of the ~5.5 GB her ears, memory and voice use (~10 GB with her
 eyes): about 19 GB for a 27B model such as `gemma3:27b`, 24 GB for a 32B one such as `qwen3:32b`, and 50 GB for a
 70B one such as `qwen2.5:72b`. So one 32 GB card (RTX 5090) holds a 27B model next to all of her (a 32B one only with
-her eyes off); a 24 GB card does not. A 70B model fits next to her only on a 72–96 GB workstation card. Otherwise run
+her eyes off); a 24 GB card does not (a user's way to fit one after all: [docs/LOCAL_24GB.md](docs/LOCAL_24GB.md)).
+A 70B model fits next to her only on a 72–96 GB workstation card. Otherwise run
 Ollama on a second PC (the Setup page takes its address), or stay Semi-Local. Whichever model you run, pick one that
 supports Chinese, since her prompts are written in it (`llama3.3:70b`, for one, does not). How to switch:
 [Optional add-ons](#optional-add-ons).
