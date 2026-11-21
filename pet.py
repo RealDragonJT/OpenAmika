@@ -365,7 +365,10 @@ class PetTransparency:
             self._subscribe(SystemEvents, 'PowerModeChanged', self._power_changed)
             self._subscribe(SystemEvents, 'SessionSwitch', self._session_changed)
             if theme_handler is not None:
-                SystemEvents.UserPreferenceChanged -= theme_handler
+                try:
+                    SystemEvents.UserPreferenceChanged -= theme_handler
+                except ValueError:
+                    pass                     # a pywebview that never subscribed it: there is nothing to take off
         except Exception:
             self.dispose()
             raise
@@ -542,7 +545,18 @@ def prepare(window, api: PetApi, base: str, size: tuple) -> None:
     # again on every start, since its saved size is what it opened with)
     scale = (_user32().GetDpiForWindow(wintypes.HWND(api._hwnd)) or 96) / 96
     form.Size = Size(round(size[0] * scale), round(size[1] * scale))
-    api._transparency = PetTransparency(form)
+    try:
+        api._transparency = PetTransparency(form)
+    except Exception as error:
+        # Keeping her see-through after system changes is a repair, not a condition: when it cannot be set up, the
+        # window is made see-through once, as before, and the rest of this setup (the microphone for her page) goes on.
+        api._transparency = None
+        print(f'pet: transparency will not be restored after system changes ({type(error).__name__}: {error})',
+              file=sys.stderr)
+        try:
+            see_through(form)
+        except Exception as again:
+            print(f'pet: the window could not be made see-through ({type(again).__name__}: {again})', file=sys.stderr)
     from Microsoft.Web.WebView2.Core import CoreWebView2PermissionKind, CoreWebView2PermissionState
 
     def on_permission(_sender, args):
