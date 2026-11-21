@@ -314,7 +314,7 @@ def see_through(form) -> None:
     but on Windows the WinForms window behind it stays opaque (grey). A black client area extended into DWM's frame
     (the 'sheet of glass') is drawn with per-pixel alpha, so the desktop shows wherever the page is transparent and
     her soft edges blend with it; Windows 11 must also be told not to draw a backdrop material there (Windows 10 has
-    none). Runs on the window's thread before it is shown."""
+    none). Always runs on the window's thread, including after Windows session/display changes."""
     from ctypes import wintypes
     from System.Drawing import Color
 
@@ -329,6 +329,108 @@ def see_through(form) -> None:
     backdrop = ctypes.c_int(DWMSBT_NONE)
     dwm.DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ctypes.byref(backdrop), ctypes.sizeof(backdrop))
     dwm.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(Margins(-1, -1, -1, -1)))
+
+
+class PetTransparency:
+    """Own this frameless form's backdrop for its lifetime (created by before_show on the UI thread).
+
+    pywebview 6.2.1's preference handler enables Mica even for transparent windows in dark mode. Remove that
+    handler on this form only; a second subscriber that merely undoes it would depend on callback ordering.
+    Windows can also reset the frame on resume/reconnect or handle recreation. SystemEvents may arrive on a
+    worker thread: queue one repair on the form's thread, never touch its Handle from the event thread.
+    """
+
+    def __init__(self, form):
+        from Microsoft.Win32 import PowerModes, SessionSwitchReason, SystemEvents
+        from System import Action, InvalidOperationException
+
+        self.form = form
+        self._action = Action
+        self._invoke_error = InvalidOperationException
+        self._resume = PowerModes.Resume
+        self._sessions = (SessionSwitchReason.SessionUnlock, SessionSwitchReason.ConsoleConnect,
+                          SessionSwitchReason.RemoteConnect)
+        self._lock = threading.Lock()
+        self._stopped = False
+        self._pending = None
+        self._subscriptions = []
+        see_through(form)                    # preserve startup transparency even if event registration fails
+        theme_handler = getattr(form, 'on_system_theme_changed', None)
+        try:
+            self._subscribe(form, 'Disposed', self.dispose)
+            self._subscribe(form, 'HandleDestroyed', self._handle_destroyed)
+            self._subscribe(form, 'HandleCreated', self._handle_created)
+            self._subscribe(SystemEvents, 'UserPreferenceChanged', self.request)
+            self._subscribe(SystemEvents, 'DisplaySettingsChanged', self.request)
+            self._subscribe(SystemEvents, 'PowerModeChanged', self._power_changed)
+            self._subscribe(SystemEvents, 'SessionSwitch', self._session_changed)
+            if theme_handler is not None:
+                SystemEvents.UserPreferenceChanged -= theme_handler
+        except Exception:
+            self.dispose()
+            raise
+
+    def _subscribe(self, owner, name, handler):
+        event = getattr(owner, name)
+        event += handler
+        self._subscriptions.append((owner, name, handler))
+
+    def _usable(self):
+        return not (self._stopped or self.form.IsDisposed or self.form.Disposing) and self.form.IsHandleCreated
+
+    def request(self, *_):
+        with self._lock:
+            if not self._usable() or self._pending is not None:
+                return
+            token = self._pending = object()
+        try:
+            # Even UI-thread notifications are deferred until the current Windows message has finished.
+            self.form.BeginInvoke(self._action(lambda: self._repair(token)))
+        except self._invoke_error:
+            # The handle can disappear between the check and BeginInvoke. A new HandleCreated will repair it.
+            with self._lock:
+                if self._pending is token:
+                    self._pending = None
+
+    def _repair(self, token):
+        with self._lock:
+            if self._pending is not token:
+                return
+            self._pending = None
+            if not self._usable():
+                return
+        try:
+            see_through(self.form)
+            self.form.Invalidate()
+        except Exception as error:
+            # Do not let an asynchronous callback escape into WinForms' unhandled-exception dialog.
+            print(f'pet: could not restore transparency ({type(error).__name__}: {error})', file=sys.stderr)
+
+    def _power_changed(self, _sender, args):
+        if args.Mode == self._resume:
+            self.request()
+
+    def _session_changed(self, _sender, args):
+        if args.Reason in self._sessions:
+            self.request()
+
+    def _handle_destroyed(self, *_):
+        with self._lock:
+            self._pending = None             # invalidate callbacks queued for the old HWND
+
+    def _handle_created(self, *_):
+        self.request()                      # fetch the new HWND only when the UI-thread callback runs
+
+    def dispose(self, *_):
+        with self._lock:
+            if self._stopped:
+                return
+            self._stopped = True
+            self._pending = None
+        for owner, name, handler in reversed(self._subscriptions):
+            event = getattr(owner, name)
+            event -= handler
+        self._subscriptions.clear()          # static SystemEvents must not retain a closed window
 
 
 class PetApi:
@@ -440,7 +542,7 @@ def prepare(window, api: PetApi, base: str, size: tuple) -> None:
     # again on every start, since its saved size is what it opened with)
     scale = (_user32().GetDpiForWindow(wintypes.HWND(api._hwnd)) or 96) / 96
     form.Size = Size(round(size[0] * scale), round(size[1] * scale))
-    see_through(form)
+    api._transparency = PetTransparency(form)
     from Microsoft.Web.WebView2.Core import CoreWebView2PermissionKind, CoreWebView2PermissionState
 
     def on_permission(_sender, args):
