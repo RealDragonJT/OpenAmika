@@ -336,10 +336,23 @@ def test_a_file_that_is_not_the_pinned_one_is_named_once_and_kept_out(hub):
     assert not (hub.engine / "Speakers" / "MekaHime_Amika" / "README.md").exists()
 
 
+def test_linux_on_arm_takes_the_torch_pair_that_exists_for_it():
+    """A DGX Spark (Linux, aarch64) has no torchaudio 2.9.1+cu128 wheel and its GB10 needs CUDA 13. Every other
+    machine keeps the pair it had."""
+    assert st.torch_build(False, "AMD64") == ("2.9.1", "cu128")         # Windows
+    assert st.torch_build(True, "x86_64") == ("2.9.1", "cu128")
+    assert st.torch_build(False, "arm64") == ("2.9.1", "cu128")         # a Mac: the CUDA tag is never used there
+    assert st.torch_build(True, "aarch64") == ("2.10.0", "cu130")
+    assert st.TORCH_INDEX["cuda"].endswith("/" + st.TORCH_CUDA) and st.TORCH_LOCAL["cuda"] == "+" + st.TORCH_CUDA
+    assert st.TORCH_CUDA_NAME in ("CUDA 12.8", "CUDA 13.0")
+
+
 def test_a_damaged_torch_is_installed_again_but_a_fresh_one_once(monkeypatch, tmp_path):
     """pip calls an installed torch satisfied even when its files are damaged: the same build goes in place again
     (--force-reinstall); a fresh venv gets one plain install, and a too-long folder is left to its own hint."""
     calls = []
+    monkeypatch.setattr(st, "TORCH_VERSION", "2.9.1")                   # the pair below, whatever machine runs this
+    monkeypatch.setattr(st, "TORCH_LOCAL", {"cuda": "+cu128", "cpu": "+cpu"})
     monkeypatch.setattr(st, "check_platform", lambda vpy: None)
     monkeypatch.setattr(st, "pip", lambda vpy, *args: calls.append(args))
     (tmp_path / ".venv" / "Scripts").mkdir(parents=True)

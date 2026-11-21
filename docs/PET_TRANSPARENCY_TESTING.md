@@ -31,44 +31,19 @@ it deliberately fails if those internals or the required DWM attribute are unava
 It does not connect to OpenAmika, open media devices, change the theme, or lock/sleep Windows.
 Native attribute checks are not evidence of visual correctness after actual sleep or unlock.
 
-## Manual acceptance on the affected Windows desktop
+## Manual check on a real desktop
 
-This requires the operator because it interrupts the interactive Windows session and needs visual observation on the
-affected desktop. Use the patched worktree's `pet.py` with the existing brain interpreter and running gateway.
-Do not copy files to the main checkout or start another launcher.
+Locking, unlocking and sleep cannot be automated. On Windows 11 in dark mode, with her desktop window open (on
+the Use page: the expand menu at the top-right of her stage, then **Desktop pet**):
 
-1. Leave the main OpenAmika services running. Close the current desktop pet with its own **×**, and close any
-   OpenAmika **Use** tabs so they release their dialog/audio sessions. The launcher leaves a normally closed pet off.
-2. In PowerShell, run the following. It reads only the main checkout's chat-port setting; the patched pet writes
-   its geometry and separate WebView2 profile under this worktree's `logs/pet-window`. It starts with power and
-   microphone off. The gateway continues serving its existing UI and model assets.
+1. The desktop shows through around her. Drag her, and resize her with the wheel.
+2. Lock Windows with **Win+L**, unlock it, and look at her background at once and again after 30 seconds.
+3. Put Windows to sleep, wake it, unlock it, and look again.
+4. Switch Windows between dark and light mode once (Settings, Personalization, Colors).
 
-   ```powershell
-   $trialRoot = (Get-Location).Path  # run from the patched worktree
-   $mainRoot = 'C:\path\to\OpenAmika'  # replace with the existing installation
-   $trialPort = (Get-Content -LiteralPath "$mainRoot\settings.json" -Raw | ConvertFrom-Json).chat_port
-   if (-not $trialPort) { $trialPort = 53000 }
-   & "$mainRoot\envs\brain\Scripts\python.exe" -B "$trialRoot\pet.py" --url "http://localhost:$trialPort"
-   ```
-
-3. Confirm the desktop shows through around the pet. Drag and resize with the wheel. Lock with **Win+L**, unlock,
-   and check the background immediately and again after 30 seconds. Repeat twice without moving her into the browser.
-4. Put Windows to sleep from the Start menu, wake/unlock, and repeat the same visual and drag/resize checks.
-   Expected: no opaque rectangle, no close/reopen needed, and controls still work. Note which cycle and how long
-   after wake any failure appears; capture a screenshot and the trial terminal's error text if it fails.
-5. Close the patched pet with its own **×**, then run the command again and confirm it opens transparent and retains
-   the trial geometry. Close it when done. To return to the original pet, open the existing main app's Use page and
-   click **Desktop pet**. That button still launches the main checkout's unpatched `pet.py`.
-
-The trial has its own instance event and profile. The main page's **Bring her back here** button does not manage
-this separate worktree pet; use its own **×** or **Full page** control. Keep a single active dialog/audio session.
-For a side-by-side visual comparison, the original and patched windows can both stay open with power and microphone
-off; their instance events and profiles are independent.
-
-Manual lock/unlock acceptance passed on Windows 11 in dark mode with pywebview 6.2.1 and pythonnet 3.2.1:
-the original window became opaque after Win+L/unlock, while the patched window remained transparent. The operator
-also accepted a side-by-side comparison. Actual sleep/resume acceptance remains unverified; the native probe
-replays resume notifications without suspending the PC.
+Expected each time: no opaque rectangle behind her, no need to close and reopen her, and dragging and resizing still
+work. If it fails, note after which step and how long after it, and keep the last lines of `logs\pet.log` (or the
+console's text, if you started `pet.py` by hand).
 
 ## Native API references
 

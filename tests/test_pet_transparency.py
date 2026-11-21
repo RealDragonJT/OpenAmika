@@ -49,6 +49,15 @@ class Form:
             callback()
 
 
+class StrictEvent(Event):
+    """As pythonnet's events are: taking off a handler that was never subscribed raises ValueError."""
+
+    def __isub__(self, handler):
+        if handler not in self.handlers:
+            raise ValueError('unknown event handler')
+        return super().__isub__(handler)
+
+
 class TransparencyTests(unittest.TestCase):
     def setUp(self):
         self.events = SimpleNamespace(**{name: Event() for name in (
@@ -187,6 +196,85 @@ class TransparencyTests(unittest.TestCase):
             pet.PetTransparency(self.form)
         self.assertEqual(self.events.UserPreferenceChanged.handlers, [self.form.on_system_theme_changed])
         self.assertEqual(self.events.SessionSwitch.handlers, [])
+
+
+class SetupGoesOnTests(unittest.TestCase):
+    """The repairs are an extra: when they cannot be set up, the window still gets its transparency and the
+    microphone for her page (prepare, the window's before_show)."""
+
+    def setUp(self):
+        self.events = SimpleNamespace(**{name: StrictEvent() for name in (
+            'UserPreferenceChanged', 'DisplaySettingsChanged', 'PowerModeChanged', 'SessionSwitch')})
+        self.form = Form()
+        self.form.Disposed, self.form.HandleCreated = StrictEvent(), StrictEvent()
+        self.form.HandleDestroyed = StrictEvent()
+        self.form.Handle = SimpleNamespace(ToInt64=lambda: 0x1234)
+        self.form.webview = SimpleNamespace(CoreWebView2InitializationCompleted=StrictEvent())
+        modules = {
+            'Microsoft.Win32': SimpleNamespace(SystemEvents=self.events, PowerModes=SimpleNamespace(Resume=1),
+                                               SessionSwitchReason=SimpleNamespace(SessionUnlock=1, ConsoleConnect=2,
+                                                                                   RemoteConnect=3)),
+            'System': SimpleNamespace(Action=lambda fn: fn, InvalidOperationException=RuntimeError),
+            'System.Drawing': SimpleNamespace(Size=lambda w, h: (w, h)),
+            'Microsoft.Web.WebView2.Core': SimpleNamespace(
+                CoreWebView2PermissionKind=SimpleNamespace(Microphone=1),
+                CoreWebView2PermissionState=SimpleNamespace(Allow=1)),
+        }
+        patch = mock.patch.dict('sys.modules', modules)
+        patch.start()
+        self.addCleanup(patch.stop)
+        patch = mock.patch.object(pet, 'see_through')
+        self.apply = patch.start()
+        self.addCleanup(patch.stop)
+        patch = mock.patch.object(pet, '_user32', return_value=SimpleNamespace(GetDpiForWindow=lambda hwnd: 96))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.api = pet.PetApi('http://localhost:53000')
+        self.window = SimpleNamespace(native=self.form)
+
+    def hooks(self):
+        return len(self.form.webview.CoreWebView2InitializationCompleted.handlers)
+
+    def subscriptions(self):
+        return sum(len(event.handlers) for event in vars(self.events).values())
+
+    def test_a_dependency_that_never_subscribed_its_handler_changes_nothing(self):
+        # pywebview has the method but did not subscribe it: taking it off raises in pythonnet
+        pet.prepare(self.window, self.api, 'http://localhost:53000', (320, 560))
+        self.addCleanup(self.api._transparency.dispose)
+        self.assertEqual(self.hooks(), 1, 'the microphone hook')
+        self.assertEqual(self.subscriptions(), 4, 'the repairs are subscribed all the same')
+        self.apply.assert_called_once_with(self.form)
+        self.events.UserPreferenceChanged.handlers[0](None, None)
+        self.form.drain()
+        self.assertEqual(self.apply.call_count, 2, 'and a preference change repairs her')
+
+    def test_when_the_repairs_cannot_be_set_up_she_is_see_through_and_has_her_microphone(self):
+        self.events.SessionSwitch.fail = True                 # one subscription fails: the whole guard is rolled back
+        with mock.patch('sys.stderr'):
+            pet.prepare(self.window, self.api, 'http://localhost:53000', (320, 560))
+        self.assertIsNone(self.api._transparency)
+        self.assertEqual(self.subscriptions(), 0, 'nothing of the guard is left on the static events')
+        self.assertEqual(self.hooks(), 1, 'the microphone hook is registered all the same')
+        self.assertEqual(self.apply.call_count, 2, 'the guard made her see-through, and so did the fallback')
+
+    def test_when_the_guard_fails_before_it_did_anything_the_fallback_makes_her_see_through(self):
+        patch = mock.patch.object(pet, 'PetTransparency', side_effect=ImportError('no Microsoft.Win32 here'))
+        patch.start()
+        self.addCleanup(patch.stop)
+        with mock.patch('sys.stderr'):
+            pet.prepare(self.window, self.api, 'http://localhost:53000', (320, 560))
+        self.assertIsNone(self.api._transparency)
+        self.apply.assert_called_once_with(self.form)
+        self.assertEqual(self.hooks(), 1, 'the microphone hook')
+
+    def test_a_window_that_cannot_be_made_see_through_still_has_her_microphone(self):
+        self.apply.side_effect = OSError('the window manager said no')
+        with mock.patch('sys.stderr'):
+            pet.prepare(self.window, self.api, 'http://localhost:53000', (320, 560))
+        self.assertIsNone(self.api._transparency)
+        self.assertEqual(self.subscriptions(), 0)
+        self.assertEqual(self.hooks(), 1, 'the microphone hook')
 
 
 if __name__ == '__main__':

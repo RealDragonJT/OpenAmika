@@ -177,6 +177,35 @@ def test_outbox_runs_one_turn_and_protects_after_the_first_send():
     asyncio.run(scenario())
 
 
+def test_the_end_of_a_turn_waits_for_a_message_still_on_its_way():
+    """The brain's events reach the outbox as separate tasks. A short reply's "end" arrives while its only message
+    is still being sent; taken at once, it found nothing delivered yet and never reported the turn as said, so the
+    brain did not keep the reply."""
+    class SlowChat(FakeChat):
+        async def send(self, text):
+            await asyncio.sleep(0.05)                         # the platform's API takes its time
+            await super().send(text)
+
+    async def scenario():
+        svc = FakeService()
+        chat = SlowChat()
+        worker = asyncio.create_task(svc.outbox.run())
+        await svc.outbox.put(chat, "hi", "telegram")
+        await asyncio.sleep(0.05)
+        turn_id = svc.brain.sent[0][1]
+        ob = svc.outbox
+        await ob.on_event("begin", {"turn_id": turn_id})
+        reply = asyncio.create_task(ob.on_event("deep_done", {"turn_id": turn_id, "speech": "hello."}))
+        await asyncio.sleep(0)                                # the send has started
+        await ob.on_event("end", {"turn_id": turn_id})
+        await reply
+        await asyncio.sleep(0.05)
+        assert chat.out == ["hello."] and svc.brain.protected == 1
+        assert svc.brain.spoken == [turn_id]
+        worker.cancel()
+    asyncio.run(scenario())
+
+
 def test_outbox_sends_a_proactive_turn_to_her_last_chat():
     async def scenario():
         last = FakeChat("her last chat")

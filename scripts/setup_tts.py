@@ -104,9 +104,18 @@ GPT_SOVITS_TTS_PY = ("GPT_SoVITS/TTS_infer_pack/TTS.py", "6a80acef239829a5af4291
 GPT_SOVITS_SELF_WRITTEN = {"GPT_SoVITS/text/g2pw/polyphonic.md5", "GPT_SoVITS/text/g2pw/polyphonic.pickle",
                            "GPT_SoVITS/configs/tts_infer.yaml"}
 
-TORCH_VERSION = "2.9.1"           # same torch/torchaudio pair the previous engine ran on an RTX 5070 (CUDA 12.8)
-TORCH_INDEX = {"cuda": "https://download.pytorch.org/whl/cu128", "cpu": "https://download.pytorch.org/whl/cpu"}
-TORCH_LOCAL = {"cuda": "+cu128", "cpu": "+cpu"}
+def torch_build(linux: bool = IS_LINUX, machine: str = platform.machine()) -> tuple[str, str]:
+    """(torch and torchaudio version, CUDA tag) to install on this machine. 2.9.1 on CUDA 12.8 is the pair the
+    previous engine ran on an RTX 5070. Linux on ARM (a DGX Spark) has no torchaudio 2.9.1+cu128 wheel, and a CUDA
+    12.8 torch cannot compile for its GB10 (nvrtc: invalid value for --gpu-architecture), so it takes the nearest
+    pair that has both wheels, on CUDA 13.0."""
+    return ("2.10.0", "cu130") if linux and machine == "aarch64" else ("2.9.1", "cu128")
+
+
+TORCH_VERSION, TORCH_CUDA = torch_build()
+TORCH_CUDA_NAME = f"CUDA {TORCH_CUDA[2:-1]}.{TORCH_CUDA[-1]}"
+TORCH_INDEX = {"cuda": f"https://download.pytorch.org/whl/{TORCH_CUDA}", "cpu": "https://download.pytorch.org/whl/cpu"}
+TORCH_LOCAL = {"cuda": f"+{TORCH_CUDA}", "cpu": "+cpu"}
 # scipy 1.17.1, onnxruntime 1.31.0 and matplotlib 3.11.2 need 3.11+; numpy<2 (upstream pin) has no wheels for 3.13
 PY_MIN, PY_MAX, PY_TESTED = (3, 11), (3, 12), (3, 11)
 GLIBC_MIN = (2, 28)               # torch 2.9.1, onnxruntime 1.31.0, soundfile 0.14.0: manylinux_2_28 wheels only
@@ -658,7 +667,7 @@ def ensure_torch(vpy: Path, device: str, reinstall: bool) -> Path:
     if good and not reinstall:
         row("OK ", "torch", f"torch {cur['torch']} / torchaudio {cur['torchaudio']} (CUDA {cur.get('cuda') or '-'}, existing)")
     else:
-        log(f"installing torch {want} + torchaudio {want} ({'CUDA 12.8' if device == 'cuda' else device})")
+        log(f"installing torch {want} + torchaudio {want} ({TORCH_CUDA_NAME if device == 'cuda' else device})")
         idx = [] if device == "mac" else ["--index-url", TORCH_INDEX[device]]
         pip(vpy, *idx, f"torch=={want}", f"torchaudio=={want}")            # what is missing, or another build
         again = reinstall or damaged
@@ -1862,7 +1871,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                                              "build of GPT-SoVITS)")
     ap.add_argument("--engine-dir", type=Path, default=SOURCE_ENGINE, help="default: vendor/tts-engine")
     ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto",
-                    help="torch build: auto = CUDA 12.8 when an NVIDIA GPU is visible (Windows/Linux), else CPU")
+                    help=f"torch build: auto = {TORCH_CUDA_NAME} when an NVIDIA GPU is visible (Windows/Linux), else CPU")
     ap.add_argument("--cpu", action="store_true", help="same as --device cpu")
     ap.add_argument("--python", default=None, help="Python 3.11 (or 3.12) interpreter for the venv (default: the first "
                                                      "3.11 found: this one, py -3.11, python3.11; then 3.12)")
@@ -1977,7 +1986,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             check_launcher(engine)
         else:
             device = pick_device(args)
-            log(f"torch build: {'CUDA 12.8' if device == 'cuda' else 'CPU + Apple MPS' if device == 'mac' else 'CPU'}")
+            log(f"torch build: {TORCH_CUDA_NAME if device == 'cuda' else 'CPU + Apple MPS' if device == 'mac' else 'CPU'}")
             # the venv chain: each step needs the one before it
             vpy = steps.run("venv", ensure_venv, engine, args.python)
             cons = steps.run("torch", ensure_torch, vpy, device, args.reinstall, needs=("venv",))
