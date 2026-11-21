@@ -187,7 +187,9 @@
   }
 
   // Ollama models under 27B parameters do not hold her character (her prompts are long and Chinese): the wizard and
-  // Setup → Brain warn before one is used. Gemma 4 26B (a mixture of experts) is the one tested exception.
+  // Setup → Brain warn before one is used. Gemma 4 26B (a mixture of experts) is the one tested exception, under
+  // Ollama's tag (gemma4:26b) and under the names other servers give it (Gemma-4-26B, nvidia/Gemma-4-26B-A4B-NVFP4).
+  const GEMMA4_26B = /(^|\/)gemma-?4[-_:]?26b/i;
   const SMALL_MODEL_WARNING = "She will not sound like herself. Use 27B or more, or the OpenRouter preset.";
   function modelBillions(model) {
     const m = String((model && (model.parameter_size || model.name)) || "").match(/(\d+(?:\.\d+)?)\s*([BbMm])\b/);
@@ -196,7 +198,7 @@
   }
   function smallModelWarning(model) {
     if (!model) return "";
-    if (/^gemma-?4:26b/i.test(String(model.name || ""))) return "";
+    if (GEMMA4_26B.test(String(model.name || ""))) return "";
     const b = modelBillions(model);
     return b !== null && b < 27 ? SMALL_MODEL_WARNING + " (" + model.name + " has about " + (Math.round(b * 10) / 10) + "B parameters.)" : "";
   }

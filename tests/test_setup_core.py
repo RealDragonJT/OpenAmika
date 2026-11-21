@@ -38,6 +38,24 @@ def test_gpu_line_parsing():
     assert core.parse_gpu("") is None and core.parse_gpu("No devices were found") is None
 
 
+def test_a_gpu_that_shares_the_system_memory_is_a_gpu(tmp_path, monkeypatch):
+    """A DGX Spark's GB10 has no memory of its own to report: nvidia-smi answers [N/A]. It used to be read as "no
+    NVIDIA GPU", and setup installed the CPU builds. Its size is the machine's RAM."""
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal:       127540704 kB\nMemFree:        20512340 kB\n", encoding="ascii")
+    assert core.system_ram_mib(meminfo) == 124551
+    assert core.system_ram_mib(tmp_path / "absent") == 0
+    monkeypatch.setattr(core, "system_ram_mib", lambda: 124551)
+    gpu = core.parse_gpu("NVIDIA GB10, [N/A]\n")
+    assert gpu == ("NVIDIA GB10", 124551)
+    assert core.vision_wanted("auto", "cuda", gpu)[0] is True
+    # where the system's memory cannot be read this way (Windows, macOS) the line stays what it was: no GPU found,
+    # never "a GPU with 0 GB" that would bring the CUDA builds; and a later line with a size is still taken
+    monkeypatch.setattr(core, "system_ram_mib", lambda: 0)
+    assert core.parse_gpu("NVIDIA GB10, [N/A]\n") is None
+    assert core.parse_gpu("Some GPU, [N/A]\nNVIDIA GeForce RTX 5090, 32607\n") == ("NVIDIA GeForce RTX 5090", 32607)
+
+
 def test_her_eyes_need_a_16_gb_card_unless_asked():
     big, small = ("RTX 5080", 16303), ("RTX 4070", 12282)
     assert core.vision_wanted("auto", "cuda", big)[0] is True
@@ -57,7 +75,21 @@ def test_settings_point_at_the_new_environments(checkout):
     cpu = core.settings_from_example("cpu", vision_on=False)
     assert cpu["speech_device"] == "cpu" and cpu["embedder"]["device"] == "cpu" and cpu["embedder"]["dtype"] == "fp32"
     assert cpu["vision"]["enabled"] is False
-    assert cpu["services"]["tts"]["command"][0].endswith("python.exe")        # her voice server block is kept
+    tts = cpu["services"]["tts"]                                              # her voice server block is kept
+    assert Path(tts["command"][0]).parts == ("vendor", "tts-engine", ".venv", *venv) and tts["command"][1] == "main.py"
+    assert Path(tts["cwd"]).parts == ("vendor", "tts-engine")
+
+
+def test_the_voice_server_path_is_the_one_settings_example_json_has_on_windows(checkout):
+    """On Windows the voice server's command and folder stay exactly as settings.example.json writes them; elsewhere
+    they name the venv's bin/python and a / path, so the launcher finds it on Linux and macOS."""
+    example = json.loads((checkout / "settings.example.json").read_text("utf-8-sig"))["services"]["tts"]
+    tts = core.settings_from_example("cuda", vision_on=False)["services"]["tts"]
+    if core.IS_WIN:
+        assert tts["command"] == example["command"] and tts["cwd"] == example["cwd"]
+    else:
+        assert tts["command"][0] == "vendor/tts-engine/.venv/bin/python" and tts["cwd"] == "vendor/tts-engine"
+        assert tts["command"][1:] == example["command"][1:]
 
 
 def test_a_conda_environment_from_the_old_readme_is_used_as_it_is(checkout):

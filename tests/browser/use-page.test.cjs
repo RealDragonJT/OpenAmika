@@ -981,3 +981,15 @@ test('shared controls retain saved devices and forward the upstream model-unlock
   assert.equal(await p.evaluate(() => OA.devices.get('mic')), 'chosen-microphone');
   assert.equal(await p.evaluate(() => OA.keyBalance({ credits: { ok: true, empty: true } }).level), 'err');
 });
+
+test('the small-model warning spares Gemma 4 26B under any of its names, and still warns for small models', async t => {
+  const p = await open(t);
+  const warn = name => p.evaluate(name => OA.smallModelWarning({ name }), name);
+  for (const name of ['gemma4:26b', 'gemma4:26b-a4b-it-qat', 'Gemma-4-26B', 'gemma-4-26b-nvfp4',
+    'nvidia/Gemma-4-26B-A4B-NVFP4', 'hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:Q4_K_M']) {
+    assert.equal(await warn(name), '', name);
+  }
+  for (const name of ['gemma4:e4b', 'gemma3:12b', 'qwen3:8b', 'llama3.1:8b']) {
+    assert.match(await warn(name), /^She will not sound like herself\./, name);
+  }
+});

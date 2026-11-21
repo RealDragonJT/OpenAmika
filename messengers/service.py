@@ -203,6 +203,7 @@ class Turn:
     def __init__(self, turn_id, chat, proactive=False):
         self.turn_id, self.chat, self.proactive = turn_id, chat, proactive
         self.done = asyncio.Event()
+        self.lock = asyncio.Lock()
         self.protected = False
         self.sent = 0
 
@@ -262,15 +263,16 @@ class Outbox:
             self.turns[turn_id] = turn
             asyncio.create_task(self._typing_until_done(turn))
             return
-        for text in replies_from(event, data):
-            await self._deliver(turn, text, system=(event == "error"))
-        if event in TERMINAL_EVENTS:
-            if event == "end" and turn.protected:
-                await self.service.brain.speech_done(turn_id)     # delivered in full: she may remember it now
-            turn.done.set()
-            if turn.proactive:
-                self.turns.pop(turn_id, None)
-            log.info(f"turn {turn_id}: {event} · {turn.sent} message(s) to {turn.chat.label}")
+        async with turn.lock:                 # events arrive concurrently: "end" must wait for a send still in flight
+            for text in replies_from(event, data):
+                await self._deliver(turn, text, system=(event == "error"))
+            if event in TERMINAL_EVENTS:
+                if event == "end" and turn.protected:
+                    await self.service.brain.speech_done(turn_id)     # delivered in full: she may remember it now
+                turn.done.set()
+                if turn.proactive:
+                    self.turns.pop(turn_id, None)
+                log.info(f"turn {turn_id}: {event} · {turn.sent} message(s) to {turn.chat.label}")
 
     async def _typing_until_done(self, turn):
         async with turn.chat.typing():

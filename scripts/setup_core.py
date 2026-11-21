@@ -183,7 +183,22 @@ def parse_gpu(text: str) -> Optional[tuple[str, int]]:
         name, _, mib = line.rpartition(",")
         if name.strip() and mib.strip().isdigit():
             return name.strip(), int(mib.strip())
+        if name.strip() and mib.strip() == "[N/A]":     # unified memory (a DGX Spark's GB10): the GPU shares the RAM
+            ram = system_ram_mib()
+            if ram:                                     # known on Linux only: elsewhere the line means what it meant
+                return name.strip(), ram
     return None
+
+
+def system_ram_mib(meminfo: Path = Path("/proc/meminfo")) -> int:
+    """Total system RAM in MiB (Linux), 0 when unknown."""
+    try:
+        for line in meminfo.read_text(encoding="ascii").splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
 
 
 def vision_wanted(mode: str, device: str, gpu: Optional[tuple[str, int]]) -> tuple[bool, str]:
@@ -627,12 +642,18 @@ def ensure_hf_model(label: str, vpy: Path, folder: Path, repo: str, cmd: list[st
 # ---- settings.json and brain/.env ---------------------------------------------------------------------------------
 def settings_from_example(device: str, vision_on: bool) -> dict:
     """settings.example.json with this machine's environments and device: the interpreters found (a venv's or a conda
-    environment's), the CPU instead of CUDA without an NVIDIA GPU, and her eyes on when they were installed."""
+    environment's), her voice server's venv in this platform's layout, the CPU instead of CUDA without an NVIDIA GPU,
+    and her eyes on when they were installed."""
     cfg = json.loads((ROOT / "settings.example.json").read_text(encoding="utf-8-sig"))
     cfg["brain_python"] = rel(env_python(ENVS / "brain"))
     cfg["speech_python"] = rel(env_python(ENVS / "speech"))
     cfg.setdefault("embedder", {})["python"] = rel(env_python(ENVS / "embed"))
     cfg.setdefault("vision", {})["python"] = rel(env_python(ENVS / "vision"))
+    tts = (cfg.get("services") or {}).get("tts")
+    if isinstance(tts, dict) and tts.get("command"):       # her voice server: scripts/setup_tts.py makes this venv
+        engine = ROOT / "vendor" / "tts-engine"
+        tts["command"][0] = rel(env_python(engine / ".venv"))
+        tts["cwd"] = rel(engine)
     if device == "cpu":
         cfg["speech_device"] = "cpu"
         cfg["embedder"].update(device="cpu", dtype="fp32")
