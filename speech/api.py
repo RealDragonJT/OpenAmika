@@ -1985,13 +1985,15 @@ async def stage_background_upload(request: Request, file: UploadFile = File(...)
 
 VLM_URL = os.getenv("AMIKA_VLM_URL", "").rstrip("/")   # empty = vision disabled
 VISION_EXPIRE_SEC = 3.0
+VISION_STALE_GRACE_SEC = 2.5       # after a camera connects: how long the service's old description is held back
 
 _vision_desc: str = ""
 _vision_desc_ts: float = 0.0
 _vision_her_line: str = ""
 _vision_lang: str = "CHINESE"
 _vision_camera_clients: int = 0
-_vision_stale: str = ""               # what the vision service still answers after the last camera left
+_vision_stale: str = ""               # what the vision service says while no camera is connected: an old picture
+_vision_camera_since: float = 0.0     # when the first camera connected, after none (time.monotonic)
 _vlm_subscribers: list = []            # [(WebSocket, asyncio.Queue)]
 _vision_poll_task = None
 
@@ -2018,19 +2020,39 @@ def _vision_fresh_desc() -> str:
 
 
 def _vision_take(desc: str) -> None:
-    """A description polled from the vision service: kept only while a camera is connected, and not when it is the
-    one that was current when the last camera left (the service repeats that one until it sees a new frame)."""
+    """A description polled from the vision service: kept only while a camera is connected.
+
+    The service goes on answering with its last description when the frames stop, and it describes a frame only
+    when the picture has changed. So what it says while no camera is on is an old picture (remembered as stale), and
+    when a camera returns that same text is held back for VISION_STALE_GRACE_SEC: time for the service to describe
+    what the camera shows now. If it still says the same after that, the camera is back on the scene she saw before,
+    and she sees it."""
     global _vision_desc, _vision_desc_ts, _vision_stale
-    if _vision_camera_clients <= 0 or not desc or desc == _vision_stale:
+    if not desc:
+        return
+    if _vision_camera_clients <= 0:
+        _vision_stale = desc
+        return
+    if desc == _vision_stale and (time.monotonic() - _vision_camera_since) < VISION_STALE_GRACE_SEC:
         return
     _vision_stale = ""
     _vision_desc = desc
     _vision_desc_ts = time.time()
 
 
+def _vision_camera_joined() -> None:
+    """One camera client connected. The first one (after none) starts the moment from which the service's old
+    description is held back for a while (_vision_take)."""
+    global _vision_camera_clients, _vision_camera_since
+    if _vision_camera_clients <= 0:
+        _vision_camera_clients = 0
+        _vision_camera_since = time.monotonic()
+    _vision_camera_clients += 1
+
+
 def _vision_camera_left() -> None:
     """One camera client disconnected. With the last one gone she sees nothing: the description is dropped, and
-    remembered as stale so that the service's repeat of it is not taken for a new one when a camera returns."""
+    remembered as stale so that the service's repeat of it is not taken at once for a new one when a camera returns."""
     global _vision_camera_clients, _vision_desc, _vision_desc_ts, _vision_stale
     _vision_camera_clients = max(0, _vision_camera_clients - 1)
     if _vision_camera_clients == 0:
@@ -2132,10 +2154,9 @@ def _ensure_vision_poller():
 @app.websocket("/ws/camera")
 async def ws_camera(ws: WebSocket):
     """Browser camera frames in (binary JPEG), fanned out to /ws/vlm_feed subscribers."""
-    global _vision_camera_clients
     await ws.accept()
     _ensure_vision_poller()
-    _vision_camera_clients += 1
+    _vision_camera_joined()
     logger.info("[vision] camera client connected")
     try:
         while True:
